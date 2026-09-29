@@ -208,7 +208,12 @@ struct ContentView: View {
                         isGenerating: llamaState.isGenerating,
                         inputsDisabled: llamaState.isLoadingModel || isSearchingWeb,
                         onSend: { Task { await submitMessage() } },
-                        onStop: { Task { await llamaState.stop() } },
+                        onStop: {
+                            Task {
+                                await llamaState.cancelForcedWebSearchGeneration()
+                                await llamaState.stop()
+                            }
+                        },
                         onDocumentImport: { showDocumentImporter = true },
                         focusState: $isFocused
                     )
