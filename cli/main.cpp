@@ -23,6 +23,11 @@ namespace fs = std::filesystem;
 
 static constexpr const char * VERSION = "0.1.2";
 
+// NedoLM/Mercan chat-control IDs. The textual aliases are <|im_start|> and
+// <|im_end|>, while the training roles are Turkish: kullanici / asistan.
+static constexpr mercan_token NEDOLM_MESSAGE_START_TOKEN = 32000;
+static constexpr mercan_token NEDOLM_MESSAGE_END_TOKEN = 32001;
+
 static void die(const std::string & message) {
     std::cerr << "mercan: " << message << "\n";
     std::exit(1);
@@ -201,11 +206,23 @@ static std::string generate(mercan_model * model, const run_options & opt, const
             mercan_context_free(ctx);
             die("sampling failed: " + err);
         }
-        if (next == eos) break;
+
+        // Stop structural chat tokens before they are converted to text or fed
+        // back into the decoder. This prevents <|im_end|>/<|im_start|> leakage.
+        if (next == eos ||
+            next == NEDOLM_MESSAGE_END_TOKEN ||
+            next == NEDOLM_MESSAGE_START_TOKEN) {
+            break;
+        }
+
         const std::string piece = token_piece(model, next);
         text += piece;
 
-        const auto stop = text.find("<|im_end|>");
+        // Compatibility fallback for artifacts/tokenizers that surface a
+        // textual alias as ordinary pieces instead of the structural ID.
+        const auto end_stop = text.find("<|im_end|>");
+        const auto start_stop = text.find("<|im_start|>");
+        const auto stop = std::min(end_stop, start_stop);
         if (stop != std::string::npos) {
             text.resize(stop);
             break;
@@ -316,7 +333,7 @@ static int command_run(int argc, char ** argv) {
     if (!model) die(std::string("model load failed: ") + mercan_last_error());
 
     if (!opt.prompt.empty()) {
-        const std::string formatted = "<|im_start|>user\n" + opt.prompt + "<|im_end|>\n<|im_start|>assistant\n";
+        const std::string formatted = "<|im_start|>kullanici\n" + opt.prompt + "<|im_end|>\n<|im_start|>asistan\n";
         std::cout << generate(model, opt, formatted) << "\n";
     } else {
         std::cout << "Mercan ready. Type /exit to quit.\n\n";
@@ -327,7 +344,7 @@ static int command_run(int argc, char ** argv) {
             if (!std::getline(std::cin, line)) break;
             if (line == "/exit" || line == "/quit") break;
             if (line.empty()) continue;
-            transcript += "<|im_start|>user\n" + line + "<|im_end|>\n<|im_start|>assistant\n";
+            transcript += "<|im_start|>kullanici\n" + line + "<|im_end|>\n<|im_start|>asistan\n";
             const std::string answer = generate(model, opt, transcript);
             std::cout << answer << "\n\n";
             transcript += answer + "<|im_end|>\n";
@@ -373,7 +390,6 @@ static int command_graph(int argc, char ** argv) {
               << "tensor_resolver=tensor-abi-v1\n";
     return 0;
 }
-
 
 static int command_plugin(int argc, char ** argv) {
     if (argc < 3) die("usage: mercan plugin <list|load PATH>");
