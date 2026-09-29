@@ -21,7 +21,7 @@ extension LlamaState {
     /// another tool-call instead of a final answer, that JSON is intercepted and
     /// never shown or persisted. The same evidence is returned as another tool
     /// result and the model gets another final-answer pass. A direct grounded
-    /// fallback is used if it keeps requesting the already-completed search.
+    /// fallback is used once if it keeps requesting the already-completed search.
     func completeWithForcedWebSearch(
         text rawText: String,
         onSearchCompleted: @escaping @MainActor () -> Void = {}
@@ -177,6 +177,7 @@ extension LlamaState {
             var finalDisplay = ""
             var toolRetryCount = 0
             let maximumToolRetries = 2
+            var directFallbackUsed = false
 
             while !ForcedWebSearchRuntimeState.shared.cancelled && !Task.isCancelled {
                 await webEngine.clearGenerationState()
@@ -210,29 +211,33 @@ extension LlamaState {
                         continue
                     }
 
-                    // Last-resort deterministic grounding path. This mirrors the
-                    // successful direct-RAG prompt used in runtime validation,
-                    // while still keeping the user's visible message unchanged.
-                    inferenceMessages = [
-                        (
-                            role: "system",
-                            content: "Web araması tamamlandı. Yalnızca nihai cevabı yaz. JSON, tool call veya araç çağrısı yazma. Web kanıtlarında olmayan ayrıntıları uydurma."
-                        ),
-                        (
-                            role: "user",
-                            content: """
-                            SORU:
-                            \(text)
+                    // One deterministic direct-RAG fallback mirrors the runtime
+                    // validation path that produced a grounded final answer.
+                    if !directFallbackUsed {
+                        inferenceMessages = [
+                            (
+                                role: "system",
+                                content: "Web araması tamamlandı. Yalnızca nihai cevabı yaz. JSON, tool call veya araç çağrısı yazma. Web kanıtlarında olmayan ayrıntıları uydurma."
+                            ),
+                            (
+                                role: "user",
+                                content: """
+                                SORU:
+                                \(text)
 
-                            WEB ARAMA KANITLARI:
-                            \(toolBody)
+                                WEB ARAMA KANITLARI:
+                                \(toolBody)
 
-                            Yukarıdaki kanıtlara dayanarak soruyu doğrudan cevapla.
-                            """
-                        )
-                    ]
-                    toolRetryCount += 1
-                    continue
+                                Yukarıdaki kanıtlara dayanarak soruyu doğrudan cevapla.
+                                """
+                            )
+                        ]
+                        directFallbackUsed = true
+                        continue
+                    }
+
+                    finalDisplay = "Web araması tamamlandı ancak model nihai cevap yerine tekrar araç çağrısı üretti."
+                    break
                 }
 
                 let filter = SpecialTokenFilter()
@@ -241,20 +246,24 @@ extension LlamaState {
                 let display = (stripper.process(filtered) + stripper.flush())
                     .trimmingCharacters(in: .whitespacesAndNewlines)
 
-                // Empty/non-answer generations get one direct grounded retry.
-                if display.isEmpty && toolRetryCount <= maximumToolRetries {
-                    inferenceMessages = [
-                        (
-                            role: "system",
-                            content: "Web araması tamamlandı. Yalnızca nihai cevabı yaz; JSON veya tool call üretme."
-                        ),
-                        (
-                            role: "user",
-                            content: "SORU:\n\(text)\n\nWEB ARAMA KANITLARI:\n\(toolBody)"
-                        )
-                    ]
-                    toolRetryCount += 1
-                    continue
+                if display.isEmpty {
+                    if !directFallbackUsed {
+                        inferenceMessages = [
+                            (
+                                role: "system",
+                                content: "Web araması tamamlandı. Yalnızca nihai cevabı yaz; JSON veya tool call üretme."
+                            ),
+                            (
+                                role: "user",
+                                content: "SORU:\n\(text)\n\nWEB ARAMA KANITLARI:\n\(toolBody)"
+                            )
+                        ]
+                        directFallbackUsed = true
+                        continue
+                    }
+
+                    finalDisplay = "Web araması tamamlandı ancak model boş bir nihai yanıt üretti."
+                    break
                 }
 
                 finalRaw = candidateRaw
