@@ -4,11 +4,13 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @StateObject private var llamaState = LlamaState()
     @StateObject private var conversationManager = ConversationManager()
+    @StateObject private var liveTokenStream = LiveTokenStreamModel.shared
 
     @State private var inputText = ""
     @State private var webSearchForNextPrompt = false
     @State private var isSearchingWeb = false
     @State private var drawerOffset: CGFloat = 0
+    @State private var lastStreamingScrollAt = Date.distantPast
 
     @State private var showSettings = false
     @State private var showManageModels = false
@@ -34,6 +36,16 @@ struct ContentView: View {
 
     private var lastAssistantMessageID: UUID? {
         llamaState.messages.last(where: { !$0.isUser })?.id
+    }
+
+    /// Prefer explicit LlamaState status text when present; otherwise surface the
+    /// runtime's coalesced token stream. This keeps the inference loop independent
+    /// from SwiftUI update frequency.
+    private var streamingContent: String {
+        if !llamaState.currentResponse.isEmpty {
+            return llamaState.currentResponse
+        }
+        return liveTokenStream.text
     }
 
     var body: some View {
@@ -148,13 +160,13 @@ struct ContentView: View {
                                         .id(message.id)
                                     }
 
-                                    if llamaState.isGenerating && llamaState.isThinking && llamaState.currentResponse.isEmpty {
+                                    if llamaState.isGenerating && llamaState.isThinking && streamingContent.isEmpty {
                                         ThinkingIndicator()
                                             .id("thinking")
                                     }
 
-                                    if llamaState.isGenerating && !llamaState.currentResponse.isEmpty {
-                                        StreamingBubble(content: llamaState.currentResponse)
+                                    if llamaState.isGenerating && !streamingContent.isEmpty {
+                                        StreamingBubble(content: streamingContent)
                                             .id("streaming")
                                     }
                                 }
@@ -167,18 +179,14 @@ struct ContentView: View {
                             .onChange(of: llamaState.messages.count) { _, _ in
                                 scrollToBottom(proxy)
                             }
-                            .onChange(of: llamaState.currentResponse) { _, _ in
-                                if llamaState.isGenerating {
-                                    withAnimation(.easeOut(duration: 0.15)) {
-                                        proxy.scrollTo("streaming", anchor: .bottom)
-                                    }
+                            .onChange(of: streamingContent) { _, value in
+                                if llamaState.isGenerating && !value.isEmpty {
+                                    throttledStreamingScroll(proxy)
                                 }
                             }
                             .onChange(of: llamaState.isThinking) { _, value in
-                                if value {
-                                    withAnimation(.easeOut(duration: 0.15)) {
-                                        proxy.scrollTo("thinking", anchor: .bottom)
-                                    }
+                                if value && streamingContent.isEmpty {
+                                    proxy.scrollTo("thinking", anchor: .bottom)
                                 }
                             }
                             .onChange(of: llamaState.currentConversation?.id) { _, _ in
@@ -304,11 +312,21 @@ struct ContentView: View {
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        if llamaState.isGenerating && !llamaState.currentResponse.isEmpty {
+        if llamaState.isGenerating && !streamingContent.isEmpty {
             proxy.scrollTo("streaming", anchor: .bottom)
         } else if let last = llamaState.messages.last {
             proxy.scrollTo(last.id, anchor: .bottom)
         }
+    }
+
+    /// Streaming text can refresh every ~50 ms, but re-running scroll/layout at
+    /// that same cadence is unnecessary. Keep scrolling responsive at about 5–6
+    /// updates per second and avoid animation during active generation.
+    private func throttledStreamingScroll(_ proxy: ScrollViewProxy) {
+        let now = Date()
+        guard now.timeIntervalSince(lastStreamingScrollAt) >= 0.18 else { return }
+        lastStreamingScrollAt = now
+        proxy.scrollTo("streaming", anchor: .bottom)
     }
 
     @MainActor
