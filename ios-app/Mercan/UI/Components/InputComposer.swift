@@ -2,6 +2,7 @@ import SwiftUI
 
 struct InputComposer: View {
     @Binding var text: String
+    @Binding var webSearchForNextPrompt: Bool
     let isGenerating: Bool
     var inputsDisabled = false
     let onSend: () -> Void
@@ -20,6 +21,25 @@ struct InputComposer: View {
                     .clipShape(Circle())
             }
             .disabled(inputsDisabled || isGenerating)
+
+            Button {
+                webSearchForNextPrompt.toggle()
+            } label: {
+                Image(systemName: "globe")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(webSearchForNextPrompt ? Color.white : Color.primary)
+                    .frame(width: 34, height: 34)
+                    .background(
+                        webSearchForNextPrompt
+                        ? MercanTheme.coral
+                        : Color(.tertiarySystemFill)
+                    )
+                    .clipShape(Circle())
+            }
+            .disabled(inputsDisabled || isGenerating)
+            .accessibilityLabel("Web Search")
+            .accessibilityValue(webSearchForNextPrompt ? "On for next message" : "Off")
+            .help("Search the web before answering this message")
 
             TextField(
                 inputsDisabled ? "Waiting for model…" : "Message Mercan",
