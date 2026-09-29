@@ -17,8 +17,11 @@ extension LlamaState {
     ///
     ///   kullanici -> asistan(tool_call JSON) -> araç(web evidence) -> asistan
     ///
-    /// The synthetic tool call and tool result are inference-only. They are not
-    /// persisted as visible conversation messages.
+    /// Synthetic tool turns are inference-only. If the small local model emits
+    /// another tool-call instead of a final answer, that JSON is intercepted and
+    /// never shown or persisted. The same evidence is returned as another tool
+    /// result and the model gets another final-answer pass. A direct grounded
+    /// fallback is used if it keeps requesting the already-completed search.
     func completeWithForcedWebSearch(
         text rawText: String,
         onSearchCompleted: @escaping @MainActor () -> Void = {}
@@ -41,8 +44,7 @@ extension LlamaState {
             return
         }
 
-        // Show the real user message immediately. Search/tool messages stay
-        // hidden and are used only for the inference prompt below.
+        // Only the real user message is visible/persistent.
         let userMessage = ChatMessage(content: text, isUser: true, timestamp: Date())
         messages.append(userMessage)
         saveCurrentConversation()
@@ -59,8 +61,6 @@ extension LlamaState {
             evidence = []
         }
 
-        // The search phase is over. ContentView can now replace the network
-        // activity indicator with the normal local-model thinking UI.
         onSearchCompleted()
 
         let callID = "preflight_web_search"
@@ -76,7 +76,7 @@ extension LlamaState {
 
         var inferenceMessages: [(role: String, content: String)] = []
         let groundingInstruction = """
-        Web araması uygulama tarafından kullanıcı isteği üzerine zaten yapıldı. Aşağıdaki araç sonucunu güncel kaynak bağlamı olarak kullan. Yeni bir tool call üretme. Araç sonucunda desteklenmeyen ayrıntıları uydurma; kanıt yetersizse bunu açıkça belirt. Kullanıcının sorusunu doğrudan cevapla.
+        Web araması uygulama tarafından kullanıcı isteği üzerine zaten tamamlandı. Son araç mesajındaki web kanıtlarını kullanarak şimdi kullanıcının sorusuna doğrudan nihai cevap ver. Yeni bir tool call, JSON veya araç isteği üretme. Araç sonucunda desteklenmeyen ayrıntıları uydurma; kanıt yetersizse bunu açıkça belirt.
         """
         let trimmedSystem = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         inferenceMessages.append((
@@ -111,7 +111,7 @@ extension LlamaState {
             ))
         }
 
-        // Persisted conversation contains only user-visible turns.
+        // Persisted history contains only user-visible turns.
         for message in messages {
             inferenceMessages.append((
                 role: message.isUser ? "user" : "assistant",
@@ -119,14 +119,13 @@ extension LlamaState {
             ))
         }
 
-        // Forced preflight search is represented exactly as a synthetic tool
-        // turn followed by an `araç` message. MercanRuntime maps `tool` -> `araç`.
+        // The search decision is made by the app, but the model sees the
+        // canonical training structure.
         inferenceMessages.append((role: "assistant", content: syntheticToolCall))
         inferenceMessages.append((role: "tool", content: toolBody))
 
-        // The regular LlamaState engine is private by design. To avoid keeping
-        // two model instances alive, temporarily unload it while this explicit
-        // tool-grounded turn runs, then restore it afterwards.
+        // Temporarily unload the regular engine so only one model instance is
+        // resident while the explicit web-grounded turn runs.
         await suspendModelForSpeech()
 
         let webEngine = MercanRuntimeEngine()
@@ -138,11 +137,6 @@ extension LlamaState {
         currentResponse = ""
         isThinking = true
         isGenerating = true
-
-        let filter = SpecialTokenFilter()
-        let thinkStripper = ThinkTagStripper()
-        var rawParts: [String] = []
-        var displayParts: [String] = []
 
         do {
             try await webEngine.initialize(
@@ -158,8 +152,8 @@ extension LlamaState {
                 repeatLastN: 64
             ))
 
-            // Keep the current user + synthetic assistant/tool tail intact while
-            // dropping only older visible conversation turns if context is tight.
+            // Preserve the current user + synthetic assistant/tool tail while
+            // dropping only older visible turns if context is tight.
             let budget = Int(Double(contextSize) * 0.88)
             var tokenCount = await webEngine.countTokens(for: inferenceMessages)
             while tokenCount > budget && inferenceMessages.count > 4 {
@@ -177,54 +171,109 @@ extension LlamaState {
             lastPromptTokenCount = tokenCount
             contextTokenCount = tokenCount
 
-            try await webEngine.generateNext(messages: inferenceMessages)
+            // Buffer each candidate before displaying it. This prevents a
+            // repeated synthetic tool-call JSON from ever reaching the UI.
+            var finalRaw = ""
+            var finalDisplay = ""
+            var toolRetryCount = 0
+            let maximumToolRetries = 2
 
-            while await !webEngine.isComplete,
-                  !ForcedWebSearchRuntimeState.shared.cancelled,
-                  !Task.isCancelled {
-                guard let token = try await webEngine.streamToken() else { continue }
-                generatedTokenCount += 1
-                rawParts.append(token)
+            while !ForcedWebSearchRuntimeState.shared.cancelled && !Task.isCancelled {
+                await webEngine.clearGenerationState()
+                try await webEngine.generateNext(messages: inferenceMessages)
 
-                let filtered = filter.process(token)
-                if !filtered.isEmpty {
-                    let display = thinkStripper.process(filtered)
-                    if !display.isEmpty {
-                        displayParts.append(display)
-                        currentResponse = displayParts.joined()
-                        isThinking = false
-                    }
+                var candidateParts: [String] = []
+                while await !webEngine.isComplete,
+                      !ForcedWebSearchRuntimeState.shared.cancelled,
+                      !Task.isCancelled {
+                    guard let token = try await webEngine.streamToken() else { continue }
+                    generatedTokenCount += 1
+                    candidateParts.append(token)
                 }
+
+                if ForcedWebSearchRuntimeState.shared.cancelled || Task.isCancelled {
+                    await webEngine.stop()
+                    break
+                }
+
+                let candidateRaw = candidateParts.joined()
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if let repeatedCalls = WebSearchService.parseToolCalls(from: candidateRaw),
+                   !repeatedCalls.isEmpty {
+                    // Never display or save the repeated tool JSON. The search
+                    // has already happened, so return the same fresh evidence.
+                    if toolRetryCount < maximumToolRetries {
+                        inferenceMessages.append((role: "assistant", content: candidateRaw))
+                        inferenceMessages.append((role: "tool", content: toolBody))
+                        toolRetryCount += 1
+                        continue
+                    }
+
+                    // Last-resort deterministic grounding path. This mirrors the
+                    // successful direct-RAG prompt used in runtime validation,
+                    // while still keeping the user's visible message unchanged.
+                    inferenceMessages = [
+                        (
+                            role: "system",
+                            content: "Web araması tamamlandı. Yalnızca nihai cevabı yaz. JSON, tool call veya araç çağrısı yazma. Web kanıtlarında olmayan ayrıntıları uydurma."
+                        ),
+                        (
+                            role: "user",
+                            content: """
+                            SORU:
+                            \(text)
+
+                            WEB ARAMA KANITLARI:
+                            \(toolBody)
+
+                            Yukarıdaki kanıtlara dayanarak soruyu doğrudan cevapla.
+                            """
+                        )
+                    ]
+                    toolRetryCount += 1
+                    continue
+                }
+
+                let filter = SpecialTokenFilter()
+                let stripper = ThinkTagStripper()
+                let filtered = filter.process(candidateRaw) + filter.flush()
+                let display = (stripper.process(filtered) + stripper.flush())
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // Empty/non-answer generations get one direct grounded retry.
+                if display.isEmpty && toolRetryCount <= maximumToolRetries {
+                    inferenceMessages = [
+                        (
+                            role: "system",
+                            content: "Web araması tamamlandı. Yalnızca nihai cevabı yaz; JSON veya tool call üretme."
+                        ),
+                        (
+                            role: "user",
+                            content: "SORU:\n\(text)\n\nWEB ARAMA KANITLARI:\n\(toolBody)"
+                        )
+                    ]
+                    toolRetryCount += 1
+                    continue
+                }
+
+                finalRaw = candidateRaw
+                finalDisplay = display
+                break
             }
 
-            if ForcedWebSearchRuntimeState.shared.cancelled || Task.isCancelled {
-                await webEngine.stop()
-            } else {
-                let filteredTail = filter.flush()
-                if !filteredTail.isEmpty {
-                    let displayTail = thinkStripper.process(filteredTail) + thinkStripper.flush()
-                    if !displayTail.isEmpty {
-                        displayParts.append(displayTail)
-                    }
-                } else {
-                    let displayTail = thinkStripper.flush()
-                    if !displayTail.isEmpty {
-                        displayParts.append(displayTail)
-                    }
-                }
-
-                let raw = rawParts.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-                let display = displayParts.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-                let saved = raw.isEmpty ? display : raw
-
-                if !saved.isEmpty {
+            if !ForcedWebSearchRuntimeState.shared.cancelled && !Task.isCancelled {
+                let saved = finalDisplay.isEmpty ? finalRaw : finalDisplay
+                if !saved.isEmpty,
+                   WebSearchService.parseToolCalls(from: saved) == nil {
+                    // Only a human-readable final answer can enter chat history.
+                    currentResponse = saved
                     messages.append(ChatMessage(content: saved, isUser: false, timestamp: Date()))
+                    saveCurrentConversation()
                 }
-                currentResponse = ""
 
                 let entropy = await webEngine.averageEntropy
                 modelConfidence = max(0, min(1, 1.0 - (entropy / 12.0)))
-                saveCurrentConversation()
             }
         } catch {
             if !ForcedWebSearchRuntimeState.shared.cancelled && !Task.isCancelled {
