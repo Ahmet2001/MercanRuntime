@@ -228,9 +228,8 @@ struct ContentView: View {
         .tint(MercanTheme.coral)
         .onAppear {
             llamaState.conversationManager = conversationManager
-            // The legacy mode asked the model to decide whether to emit a
-            // web_search tool call. Web search is now an explicit, per-prompt
-            // app decision handled before model generation.
+            // Legacy model-driven tool calls stay disabled. The user explicitly
+            // enables Web Search per prompt in the composer instead.
             llamaState.webSearchEnabled = false
             showOnboarding = !didCompleteOnboarding
             Task {
@@ -331,74 +330,19 @@ struct ContentView: View {
         inputText = ""
 
         // Always keep the old model-driven tool-call loop disabled. If search is
-        // requested, the app searches first and only then starts generation.
+        // requested, the app performs it before any generation and injects a
+        // synthetic assistant tool-call + `araç` result into the inference-only
+        // prompt sequence.
         llamaState.webSearchEnabled = false
         if shouldSearchWeb {
-            await completeWithForcedWebSearch(text: text)
+            isSearchingWeb = true
+            await llamaState.completeWithForcedWebSearch(text: text) {
+                isSearchingWeb = false
+            }
+            isSearchingWeb = false
         } else {
             await llamaState.complete(text: text)
         }
-    }
-
-    @MainActor
-    private func completeWithForcedWebSearch(text: String) async {
-        let previousDocument = llamaState.attachedDocument
-        let searchService = WebSearchService()
-        isSearchingWeb = true
-
-        defer {
-            isSearchingWeb = false
-            llamaState.attachedDocument = previousDocument
-            llamaState.webSearchEnabled = false
-        }
-
-        let results: [WebSearchResult]
-        do {
-            results = try await searchService.search(query: text, maxResults: 5)
-        } catch {
-            results = []
-        }
-
-        let webEvidence = WebSearchService.trainingStyleToolResult(
-            query: text,
-            callID: "preflight_web_search",
-            results: results
-        )
-
-        var groundingText = """
-        WEB SEARCH RESULTS
-        The app performed this web search before model generation. Use the results below as grounding evidence for the user's current question. Prefer this evidence over unsupported memory. If the results do not support a claim, say so clearly instead of inventing details.
-
-        Search query: \(text)
-
-        \(webEvidence)
-        """
-
-        if let previousDocument {
-            groundingText += """
-
-
-            ATTACHED DOCUMENT CONTEXT
-            Document: \(previousDocument.name)
-
-            \(previousDocument.text)
-            """
-        }
-
-        llamaState.attachedDocument = AttachedDocument(
-            name: previousDocument == nil ? "Web Search" : "Web Search + \(previousDocument!.name)",
-            kind: "WEB",
-            text: groundingText
-        )
-
-        // Search has completed; model generation starts only now.
-        isSearchingWeb = false
-
-        // complete(text:) receives the original user message unchanged. The
-        // fresh web evidence is injected as grounding context, so it is not
-        // shown as part of the user's chat bubble and it is not saved as a fake
-        // user message in conversation history.
-        await llamaState.complete(text: text)
     }
 
     private func handleDocumentImport(_ result: Result<[URL], Error>) {
