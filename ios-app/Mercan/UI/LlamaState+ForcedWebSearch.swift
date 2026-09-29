@@ -1,6 +1,13 @@
 import Foundation
 
 @MainActor
+private final class ForcedWebSearchRuntimeState {
+    static let shared = ForcedWebSearchRuntimeState()
+    var engine: MercanRuntimeEngine?
+    var cancelled = false
+}
+
+@MainActor
 extension LlamaState {
     /// Explicit Web Search flow selected by the user in the composer.
     ///
@@ -123,6 +130,9 @@ extension LlamaState {
         await suspendModelForSpeech()
 
         let webEngine = MercanRuntimeEngine()
+        ForcedWebSearchRuntimeState.shared.engine = webEngine
+        ForcedWebSearchRuntimeState.shared.cancelled = false
+
         let started = Date()
         generatedTokenCount = 0
         currentResponse = ""
@@ -169,7 +179,9 @@ extension LlamaState {
 
             try await webEngine.generateNext(messages: inferenceMessages)
 
-            while await !webEngine.isComplete {
+            while await !webEngine.isComplete,
+                  !ForcedWebSearchRuntimeState.shared.cancelled,
+                  !Task.isCancelled {
                 guard let token = try await webEngine.streamToken() else { continue }
                 generatedTokenCount += 1
                 rawParts.append(token)
@@ -185,48 +197,65 @@ extension LlamaState {
                 }
             }
 
-            let filteredTail = filter.flush()
-            if !filteredTail.isEmpty {
-                let displayTail = thinkStripper.process(filteredTail) + thinkStripper.flush()
-                if !displayTail.isEmpty {
-                    displayParts.append(displayTail)
-                }
+            if ForcedWebSearchRuntimeState.shared.cancelled || Task.isCancelled {
+                await webEngine.stop()
             } else {
-                let displayTail = thinkStripper.flush()
-                if !displayTail.isEmpty {
-                    displayParts.append(displayTail)
+                let filteredTail = filter.flush()
+                if !filteredTail.isEmpty {
+                    let displayTail = thinkStripper.process(filteredTail) + thinkStripper.flush()
+                    if !displayTail.isEmpty {
+                        displayParts.append(displayTail)
+                    }
+                } else {
+                    let displayTail = thinkStripper.flush()
+                    if !displayTail.isEmpty {
+                        displayParts.append(displayTail)
+                    }
                 }
+
+                let raw = rawParts.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                let display = displayParts.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                let saved = raw.isEmpty ? display : raw
+
+                if !saved.isEmpty {
+                    messages.append(ChatMessage(content: saved, isUser: false, timestamp: Date()))
+                }
+                currentResponse = ""
+
+                let entropy = await webEngine.averageEntropy
+                modelConfidence = max(0, min(1, 1.0 - (entropy / 12.0)))
+                saveCurrentConversation()
             }
-
-            let raw = rawParts.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-            let display = displayParts.joined().trimmingCharacters(in: .whitespacesAndNewlines)
-            let saved = raw.isEmpty ? display : raw
-
-            if !saved.isEmpty {
-                messages.append(ChatMessage(content: saved, isUser: false, timestamp: Date()))
-            }
-            currentResponse = ""
-
-            let entropy = await webEngine.averageEntropy
-            modelConfidence = max(0, min(1, 1.0 - (entropy / 12.0)))
-            saveCurrentConversation()
         } catch {
-            currentResponse = ""
-            let errorText = "Web araması tamamlandı ancak yerel model yanıtı üretilemedi: \(error.localizedDescription)"
-            messages.append(ChatMessage(content: errorText, isUser: false, timestamp: Date()))
-            saveCurrentConversation()
+            if !ForcedWebSearchRuntimeState.shared.cancelled && !Task.isCancelled {
+                currentResponse = ""
+                let errorText = "Web araması tamamlandı ancak yerel model yanıtı üretilemedi: \(error.localizedDescription)"
+                messages.append(ChatMessage(content: errorText, isUser: false, timestamp: Date()))
+                saveCurrentConversation()
+            }
         }
 
         await webEngine.deinitialize()
+        ForcedWebSearchRuntimeState.shared.engine = nil
+        ForcedWebSearchRuntimeState.shared.cancelled = false
 
         let duration = max(Date().timeIntervalSince(started), 0.001)
         lastGenerationDuration = duration
         lastGenerationTokensPerSecond = Double(generatedTokenCount) / duration
+        currentResponse = ""
         isThinking = false
         isGenerating = false
 
         // Restore the normal conversation engine for the next non-web turn.
         await resumeModelAfterSpeech()
+    }
+
+    func cancelForcedWebSearchGeneration() async {
+        guard let engine = ForcedWebSearchRuntimeState.shared.engine else { return }
+        ForcedWebSearchRuntimeState.shared.cancelled = true
+        await engine.stop()
+        currentResponse = ""
+        isThinking = false
     }
 
     private func forcedSearchModelURL() -> URL? {
