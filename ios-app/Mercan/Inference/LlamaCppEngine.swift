@@ -39,6 +39,7 @@ actor MercanRuntimeEngine: InferenceEngine {
             )
         }
 
+        await LiveTokenCoalescer.shared.beginGeneration()
         await context.setSampling(samplingConfiguration)
         let finalPrompt = await context.apply_chat_template(messages: messages)
         try await context.completion_init_with_cache(text: finalPrompt)
@@ -63,18 +64,24 @@ actor MercanRuntimeEngine: InferenceEngine {
 
         if await context.is_done {
             isComplete = true
+            await LiveTokenCoalescer.shared.finishGeneration()
             return nil
         }
 
         let token = try await context.completion_loop()
+        if !token.isEmpty {
+            await LiveTokenCoalescer.shared.ingest(token)
+        }
         if await context.is_done {
             isComplete = true
+            await LiveTokenCoalescer.shared.finishGeneration()
         }
         return token
     }
 
     func stop() async {
         isComplete = true
+        await LiveTokenCoalescer.shared.finishGeneration()
         if let context = runtimeContext {
             await context.clearGenerationState()
         }
@@ -88,6 +95,7 @@ actor MercanRuntimeEngine: InferenceEngine {
         if let context = runtimeContext {
             await context.clear()
         }
+        await LiveTokenCoalescer.shared.clearPresentation()
         isComplete = true
     }
 
@@ -117,6 +125,7 @@ actor MercanRuntimeEngine: InferenceEngine {
 
     func deinitialize() async {
         runtimeContext = nil
+        await LiveTokenCoalescer.shared.clearPresentation()
         isComplete = true
     }
 }
