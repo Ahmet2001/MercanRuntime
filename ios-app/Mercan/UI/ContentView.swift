@@ -7,6 +7,7 @@ struct ContentView: View {
 
     @State private var inputText = ""
     @State private var webSearchForNextPrompt = false
+    @State private var isSearchingWeb = false
     @State private var drawerOffset: CGFloat = 0
 
     @State private var showSettings = false
@@ -188,11 +189,24 @@ struct ContentView: View {
                         }
                     }
 
+                    if isSearchingWeb {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Searching the web…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 4)
+                    }
+
                     InputComposer(
                         text: $inputText,
                         webSearchForNextPrompt: $webSearchForNextPrompt,
                         isGenerating: llamaState.isGenerating,
-                        inputsDisabled: llamaState.isLoadingModel,
+                        inputsDisabled: llamaState.isLoadingModel || isSearchingWeb,
                         onSend: { Task { await submitMessage() } },
                         onStop: { Task { await llamaState.stop() } },
                         onDocumentImport: { showDocumentImporter = true },
@@ -295,7 +309,7 @@ struct ContentView: View {
 
     @MainActor
     private func submitMessage() async {
-        guard !llamaState.isGenerating else { return }
+        guard !llamaState.isGenerating, !isSearchingWeb else { return }
 
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
@@ -330,6 +344,13 @@ struct ContentView: View {
     private func completeWithForcedWebSearch(text: String) async {
         let previousDocument = llamaState.attachedDocument
         let searchService = WebSearchService()
+        isSearchingWeb = true
+
+        defer {
+            isSearchingWeb = false
+            llamaState.attachedDocument = previousDocument
+            llamaState.webSearchEnabled = false
+        }
 
         let results: [WebSearchResult]
         do {
@@ -370,16 +391,14 @@ struct ContentView: View {
             text: groundingText
         )
 
-        // complete(text:) now receives the original user message unchanged.
-        // The fresh web evidence is injected as grounding context, so it is not
+        // Search has completed; model generation starts only now.
+        isSearchingWeb = false
+
+        // complete(text:) receives the original user message unchanged. The
+        // fresh web evidence is injected as grounding context, so it is not
         // shown as part of the user's chat bubble and it is not saved as a fake
         // user message in conversation history.
         await llamaState.complete(text: text)
-
-        // Search grounding is one-shot. Restore any real user attachment after
-        // the answer, while keeping the legacy model-driven tool loop disabled.
-        llamaState.attachedDocument = previousDocument
-        llamaState.webSearchEnabled = false
     }
 
     private func handleDocumentImport(_ result: Result<[URL], Error>) {
