@@ -56,14 +56,18 @@ struct MessageBubble: View {
     }
 }
 
+/// Streaming intentionally uses plain Text. Re-parsing Markdown every 50 ms is
+/// expensive on-device; the final persisted assistant bubble still renders full
+/// Markdown after generation completes.
 struct StreamingBubble: View {
     let content: String
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             MercanMark(size: 20)
-            MarkdownText(text: content.isEmpty ? " " : content, isStreaming: true)
+            Text(content.isEmpty ? " " : content)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
