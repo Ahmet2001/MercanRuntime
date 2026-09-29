@@ -68,7 +68,7 @@ extension LlamaState {
             query: text,
             callID: callID
         )
-        let toolBody = WebSearchService.groundedToolResult(
+        var toolBody = WebSearchService.groundedToolResult(
             query: text,
             callID: callID,
             evidence: evidence
@@ -152,22 +152,76 @@ extension LlamaState {
                 repeatLastN: 64
             ))
 
-            // Preserve the current user + synthetic assistant/tool tail while
-            // dropping only older visible turns if context is tight.
-            let budget = Int(Double(contextSize) * 0.88)
+            // Reserve real generation room instead of filling almost the whole
+            // context with search evidence. 4K contexts keep ~1K tokens free;
+            // smaller contexts keep at least 512 tokens free.
+            let generationReserve = max(512, min(1024, Int(contextSize) / 4))
+            let promptBudget = max(768, Int(contextSize) - generationReserve - 64)
             var tokenCount = await webEngine.countTokens(for: inferenceMessages)
-            while tokenCount > budget && inferenceMessages.count > 4 {
-                let protectedTailStart = max(0, inferenceMessages.count - 3)
-                var removeIndex = 0
-                while removeIndex < protectedTailStart,
-                      inferenceMessages[removeIndex].role == "system" {
-                    removeIndex += 1
-                }
-                guard removeIndex < protectedTailStart else { break }
-                inferenceMessages.remove(at: removeIndex)
+
+            // Always preserve the primary system instruction and the final
+            // current-user -> synthetic-tool-call -> tool-result tail. Anything
+            // older (history, transcript/document system additions) is expendable
+            // before fresh web grounding.
+            while tokenCount > promptBudget && inferenceMessages.count > 4 {
+                inferenceMessages.remove(at: 1)
                 tokenCount = await webEngine.countTokens(for: inferenceMessages)
                 contextTruncated = true
             }
+
+            // If the fresh web evidence itself still does not fit, compact it
+            // using the runtime's exact tokenizer count. This is deliberately
+            // token-aware rather than relying only on character estimates.
+            while tokenCount > promptBudget && toolBody.count > 700 {
+                let nextLength = max(700, Int(Double(toolBody.count) * 0.72))
+                guard nextLength < toolBody.count else { break }
+                toolBody = String(toolBody.prefix(nextLength))
+                    + "\n\n[Web kanıtı context sınırı nedeniyle kısaltıldı.]"
+                if inferenceMessages.last?.role == "tool" {
+                    inferenceMessages[inferenceMessages.count - 1] = (role: "tool", content: toolBody)
+                }
+                tokenCount = await webEngine.countTokens(for: inferenceMessages)
+                contextTruncated = true
+            }
+
+            // A custom system prompt can itself be very large. For the forced
+            // search path, prefer the short grounding instruction rather than
+            // failing the whole turn after evidence has already been fetched.
+            if tokenCount > promptBudget && !inferenceMessages.isEmpty {
+                inferenceMessages[0] = (role: "system", content: groundingInstruction)
+                tokenCount = await webEngine.countTokens(for: inferenceMessages)
+                contextTruncated = true
+            }
+
+            // Final safety compaction for unusually small contexts. Keep URLs and
+            // the beginning of the highest-ranked evidence rather than sending an
+            // over-context prompt that cannot generate any answer.
+            while tokenCount > promptBudget && toolBody.count > 320 {
+                let nextLength = max(320, Int(Double(toolBody.count) * 0.70))
+                guard nextLength < toolBody.count else { break }
+                toolBody = String(toolBody.prefix(nextLength))
+                    + "\n[Kanıt context sınırı için kısaltıldı.]"
+                if inferenceMessages.last?.role == "tool" {
+                    inferenceMessages[inferenceMessages.count - 1] = (role: "tool", content: toolBody)
+                }
+                tokenCount = await webEngine.countTokens(for: inferenceMessages)
+                contextTruncated = true
+            }
+
+            // At this point an overflow is no longer caused by web evidence; it
+            // means the user's current question itself is too large for the
+            // selected context. Surface that distinction explicitly.
+            guard tokenCount <= promptBudget else {
+                throw NSError(
+                    domain: "MercanWebSearch",
+                    code: 413,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Kullanıcının mevcut sorusu seçili context boyutuna sığmıyor. Context size'ı artırın veya soruyu kısaltın."
+                    ]
+                )
+            }
+
             lastPromptTokenCount = tokenCount
             contextTokenCount = tokenCount
 
@@ -202,11 +256,16 @@ extension LlamaState {
 
                 if let repeatedCalls = WebSearchService.parseToolCalls(from: candidateRaw),
                    !repeatedCalls.isEmpty {
-                    // Never display or save the repeated tool JSON. The search
-                    // has already happened, so return the same fresh evidence.
+                    // Never display or save repeated tool JSON. Retry with a
+                    // compact canonical sequence instead of appending more and
+                    // more tool turns, which could overflow the context again.
                     if toolRetryCount < maximumToolRetries {
-                        inferenceMessages.append((role: "assistant", content: candidateRaw))
-                        inferenceMessages.append((role: "tool", content: toolBody))
+                        inferenceMessages = [
+                            (role: "system", content: groundingInstruction),
+                            (role: "user", content: text),
+                            (role: "assistant", content: candidateRaw),
+                            (role: "tool", content: toolBody)
+                        ]
                         toolRetryCount += 1
                         continue
                     }
