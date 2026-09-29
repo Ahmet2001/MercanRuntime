@@ -76,11 +76,8 @@ struct SettingsView: View {
                 }
 
                 Section("Web") {
-                    Toggle(isOn: $llamaState.webSearchEnabled) {
-                        Label("Web Search", systemImage: "globe")
-                    }
-
-                    Text("Mercan may call its learned web_search tool for current or uncertain information. Search results are returned to the local model as context.")
+                    Label("Per-message Web Search", systemImage: "globe")
+                    Text("Tap the globe next to the message field before sending. Mercan searches first, injects the fresh web results as grounding context, and only then lets the local model generate the answer. The model no longer decides whether to call web search itself.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
