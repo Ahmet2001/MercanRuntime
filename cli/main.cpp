@@ -167,73 +167,6 @@ static std::string http_get(const std::string & url) {
     return out;
 }
 
-static void replace_all(std::string & s, const std::string & from, const std::string & to) {
-    size_t pos = 0;
-    while ((pos = s.find(from, pos)) != std::string::npos) {
-        s.replace(pos, from.size(), to);
-        pos += to.size();
-    }
-}
-
-static std::string strip_html(const std::string & html) {
-    std::string s = html;
-    auto remove_block = [&](const std::string & tag) {
-        const std::string open = "<" + tag;
-        const std::string close = "</" + tag + ">";
-        size_t pos = 0;
-        while ((pos = s.find(open, pos)) != std::string::npos) {
-            const size_t end_open = s.find('>', pos);
-            if (end_open == std::string::npos) { s.erase(pos); break; }
-            const size_t close_pos = s.find(close, end_open);
-            if (close_pos == std::string::npos) { s.erase(pos); break; }
-            s.erase(pos, close_pos + close.size() - pos);
-        }
-    };
-    remove_block("script");
-    remove_block("style");
-
-    std::string out;
-    out.reserve(s.size());
-    bool in_tag = false;
-    for (char c : s) {
-        if (c == '<') { in_tag = true; continue; }
-        if (c == '>') { in_tag = false; out += ' '; continue; }
-        if (!in_tag) out += c;
-    }
-
-    replace_all(out, "&nbsp;", " ");
-    replace_all(out, "&amp;", "&");
-    replace_all(out, "&quot;", "\"");
-    replace_all(out, "&#39;", "'");
-    replace_all(out, "&#x27;", "'");
-    replace_all(out, "&lt;", "<");
-    replace_all(out, "&gt;", ">");
-
-    std::string collapsed;
-    collapsed.reserve(out.size());
-    bool last_space = false;
-    for (char c : out) {
-        const bool is_space = std::isspace(static_cast<unsigned char>(c)) != 0;
-        if (is_space) {
-            if (!last_space) collapsed += ' ';
-            last_space = true;
-        } else {
-            collapsed += c;
-            last_space = false;
-        }
-    }
-    const size_t b = collapsed.find_first_not_of(' ');
-    if (b == std::string::npos) return {};
-    const size_t e = collapsed.find_last_not_of(' ');
-    return collapsed.substr(b, e - b + 1);
-}
-
-struct web_result {
-    std::string title;
-    std::string url;
-    std::string snippet;
-};
-
 static void append_utf8(std::string & out, unsigned int cp) {
     if (cp <= 0x7F) {
         out += static_cast<char>(cp);
@@ -266,6 +199,124 @@ static int hex4(const std::string & s, size_t pos) {
     }
     return v;
 }
+
+// Named HTML entities beyond the 7 hand-picked ones aren't rare edge cases on real pages —
+// Turkish-language sites (and plenty of English ones) lean on &uuml; &ccedil; &ouml; etc.
+// instead of raw UTF-8, and leaving those undecoded handed the model visibly corrupted text
+// (observed directly: an Apple support page came through full of "g&uuml;venlik" style
+// noise, and the model's answer degraded into confused meta-narration on that input).
+static const std::pair<const char *, unsigned int> NAMED_ENTITIES[] = {
+    {"amp", 0x26}, {"lt", 0x3C}, {"gt", 0x3E}, {"quot", 0x22}, {"apos", 0x27}, {"nbsp", 0x00A0},
+    {"uuml", 0x00FC}, {"Uuml", 0x00DC}, {"ouml", 0x00F6}, {"Ouml", 0x00D6},
+    {"auml", 0x00E4}, {"Auml", 0x00C4}, {"ccedil", 0x00E7}, {"Ccedil", 0x00C7},
+    {"szlig", 0x00DF}, {"eacute", 0x00E9}, {"Eacute", 0x00C9}, {"egrave", 0x00E8},
+    {"ecirc", 0x00EA}, {"agrave", 0x00E0}, {"acirc", 0x00E2}, {"ntilde", 0x00F1},
+    {"iuml", 0x00EF}, {"icirc", 0x00EE}, {"ocirc", 0x00F4}, {"ucirc", 0x00FB},
+    {"aring", 0x00E5}, {"oslash", 0x00F8}, {"ndash", 0x2013}, {"mdash", 0x2014},
+    {"hellip", 0x2026}, {"lsquo", 0x2018}, {"rsquo", 0x2019}, {"ldquo", 0x201C},
+    {"rdquo", 0x201D}, {"copy", 0x00A9}, {"reg", 0x00AE}, {"trade", 0x2122},
+    {"deg", 0x00B0}, {"middot", 0x00B7}, {"bull", 0x2022},
+};
+
+// Decodes numeric (&#NNN; / &#xHH;) and the common named HTML entities in-place, appending
+// into out. pos points at the '&'; returns the index just past the consumed entity, or pos
+// itself if this wasn't a recognized entity (caller should then copy the '&' verbatim).
+static size_t decode_entity_at(const std::string & s, size_t pos, std::string & out) {
+    const size_t semi = s.find(';', pos);
+    if (semi == std::string::npos || semi - pos > 12) return pos;
+    const std::string body = s.substr(pos + 1, semi - pos - 1);
+    if (body.empty()) return pos;
+
+    if (body[0] == '#') {
+        unsigned int cp = 0;
+        bool ok = false;
+        if (body.size() > 1 && (body[1] == 'x' || body[1] == 'X')) {
+            for (size_t i = 2; i < body.size(); ++i) {
+                const int d = body[i] >= '0' && body[i] <= '9' ? body[i] - '0'
+                    : body[i] >= 'a' && body[i] <= 'f' ? body[i] - 'a' + 10
+                    : body[i] >= 'A' && body[i] <= 'F' ? body[i] - 'A' + 10 : -1;
+                if (d < 0) { ok = false; break; }
+                cp = (cp << 4) | static_cast<unsigned int>(d);
+                ok = true;
+            }
+        } else {
+            for (size_t i = 1; i < body.size(); ++i) {
+                if (body[i] < '0' || body[i] > '9') { ok = false; break; }
+                cp = cp * 10 + static_cast<unsigned int>(body[i] - '0');
+                ok = true;
+            }
+        }
+        if (!ok) return pos;
+        append_utf8(out, cp);
+        return semi + 1;
+    }
+
+    for (const auto & entry : NAMED_ENTITIES) {
+        if (body == entry.first) {
+            append_utf8(out, entry.second);
+            return semi + 1;
+        }
+    }
+    return pos;
+}
+
+static std::string strip_html(const std::string & html) {
+    std::string s = html;
+    auto remove_block = [&](const std::string & tag) {
+        const std::string open = "<" + tag;
+        const std::string close = "</" + tag + ">";
+        size_t pos = 0;
+        while ((pos = s.find(open, pos)) != std::string::npos) {
+            const size_t end_open = s.find('>', pos);
+            if (end_open == std::string::npos) { s.erase(pos); break; }
+            const size_t close_pos = s.find(close, end_open);
+            if (close_pos == std::string::npos) { s.erase(pos); break; }
+            s.erase(pos, close_pos + close.size() - pos);
+        }
+    };
+    remove_block("script");
+    remove_block("style");
+
+    std::string out;
+    out.reserve(s.size());
+    bool in_tag = false;
+    for (size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if (c == '<') { in_tag = true; continue; }
+        if (c == '>') { in_tag = false; out += ' '; continue; }
+        if (in_tag) continue;
+        if (c == '&') {
+            const size_t next = decode_entity_at(s, i, out);
+            if (next != i) { i = next - 1; continue; }
+        }
+        out += c;
+    }
+
+    std::string collapsed;
+    collapsed.reserve(out.size());
+    bool last_space = false;
+    for (char c : out) {
+        const bool is_space = std::isspace(static_cast<unsigned char>(c)) != 0;
+        if (is_space) {
+            if (!last_space) collapsed += ' ';
+            last_space = true;
+        } else {
+            collapsed += c;
+            last_space = false;
+        }
+    }
+    const size_t b = collapsed.find_first_not_of(' ');
+    if (b == std::string::npos) return {};
+    const size_t e = collapsed.find_last_not_of(' ');
+    return collapsed.substr(b, e - b + 1);
+}
+
+struct web_result {
+    std::string title;
+    std::string url;
+    std::string snippet;
+};
+
 
 // Reads a JSON string value for "key": "..." out of a raw object slice (Python's json.dumps
 // spacing), handling \uXXXX escapes (incl. surrogate pairs) and the usual backslash escapes.
@@ -337,6 +388,96 @@ static size_t json_object_end(const std::string & s, size_t start) {
     return std::string::npos;
 }
 
+static std::string json_escape(const std::string & s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out;
+}
+
+struct history_turn {
+    std::string role; // "user" / "assistant" — the Yargı envelope's own role labels, not the ChatML ones
+    std::string content;
+};
+
+// Mirrors the real Yargı training schema (verified against train.jsonl): no tool_call_id
+// field, and "data" is action-specific structured JSON (not a generic text blob) — for a
+// "search" action that's {"count":N,"results":[{...metadata...}]}. data_json/error_json
+// hold pre-built raw JSON (already valid, e.g. "null" or a quoted string) so this struct
+// stays generic across action shapes instead of hardcoding one.
+struct tool_observation {
+    std::string action;
+    std::string data_json;      // raw JSON value for "data"
+    std::string status = "success";
+    std::string error_json = "null"; // raw JSON value for "error": null or "\"message\""
+};
+
+static std::string tool_observation_json(const tool_observation & o) {
+    std::ostringstream oss;
+    oss << "{\"action\":\"" << json_escape(o.action) << "\","
+        << "\"data\":" << o.data_json << ","
+        << "\"status\":\"" << json_escape(o.status) << "\","
+        << "\"error\":" << o.error_json << "}";
+    return oss.str();
+}
+
+static std::string history_json_array(const std::vector<history_turn> & history) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < history.size(); ++i) {
+        if (i) oss << ",";
+        oss << "{\"role\":\"" << json_escape(history[i].role) << "\","
+            << "\"content\":\"" << json_escape(history[i].content) << "\"}";
+    }
+    oss << "]";
+    return oss.str();
+}
+
+static std::string observations_json_array(const std::vector<tool_observation> & observations) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < observations.size(); ++i) {
+        if (i) oss << ",";
+        oss << tool_observation_json(observations[i]);
+    }
+    oss << "]";
+    return oss.str();
+}
+
+// Builds the labeled-section USER turn content the model actually saw in training:
+// ORIGINAL_USER_PROMPT / CONVERSATION_HISTORY_JSON / EXECUTOR_OBSERVATIONS_JSON, each a
+// plain-text label followed by its value (JSON arrays for the latter two, "[]" when empty).
+// This is embedded as the CONTENT of one ChatML "kullanici" turn. The model replies with
+// plain natural-language text — the {"response": ...} runtime wrapper is added
+// deterministically by the caller, never asked of the model.
+static std::string build_labeled_content(
+    const std::string & user_prompt,
+    const std::vector<history_turn> & history,
+    const std::vector<tool_observation> & observations) {
+    std::ostringstream oss;
+    oss << "ORIGINAL_USER_PROMPT:\n" << user_prompt << "\n\n"
+        << "CONVERSATION_HISTORY_JSON:\n" << history_json_array(history) << "\n\n"
+        << "EXECUTOR_OBSERVATIONS_JSON:\n" << observations_json_array(observations) << "\n\n"
+        << "Kullanıcıya verilecek nihai cevabı yaz.";
+    return oss.str();
+}
+
 // Queries a self-hosted SearXNG instance's JSON API (open source, no API key). Public
 // instances tend to sit behind bot-detection that blocks unauthenticated scripts, so this
 // is meant to point at an instance the user runs themselves (e.g. via Docker, on their own
@@ -380,33 +521,49 @@ static std::string fetch_page_excerpt(const std::string & url, size_t max_chars)
 }
 
 // Mandatory when --web-search is on: always searches and fetches, regardless of what the
-// model would have "wanted" to do, since this model can't decide that for itself.
-static std::string build_web_context(
+// model would have "wanted" to do, since this model can't decide that for itself. Returns
+// a single "search" tool_observation shaped like the real training data (verified against
+// train.jsonl): {"action":"search","data":{"count":N,"results":[{...}]},"status":...,
+// "error":...}. Unlike the training examples (metadata only, no page body — a separate
+// "get_result_metadata" action fetches detail), each result here also carries a "content"
+// field with the fetched page excerpt: without it the model would have titles/URLs but no
+// actual information to compose an answer from, defeating the point of web search.
+static std::vector<tool_observation> build_web_observations(
     const std::string & query, int max_results, size_t max_chars_per_page, const std::string & searxng_base) {
     std::cerr << "[web-search] araniyor: \"" << query << "\" (" << searxng_base << ")\n";
     const auto results = web_search_query(query, max_results, searxng_base);
+
+    tool_observation obs;
+    obs.action = "search";
+
     if (results.empty()) {
-        std::cerr << "[web-search] sonuc bulunamadi (SearXNG'e ulasilamadi mi? --web-search-url ile kontrol et), aramasiz devam ediliyor.\n";
-        return {};
+        std::cerr << "[web-search] sonuc bulunamadi (SearXNG'e ulasilamadi mi? --web-search-url ile kontrol et).\n";
+        obs.data_json = "{\"count\":0,\"results\":[]}";
+        obs.status = "error";
+        obs.error_json = "\"arama sonucu bulunamadi\"";
+        return {obs};
     }
 
-    // Deliberately avoids bracket/tag-style markup (e.g. "[FOO]") around the sources: a small
-    // model tends to mimic whatever formatting it just saw in its own input, and previous
-    // wording here got echoed back verbatim as fake section labels in the model's answer.
-    std::ostringstream oss;
-    oss << "Web arama sonuclari:\n\n";
+    std::ostringstream data;
+    data << "{\"count\":" << results.size() << ",\"results\":[";
     int idx = 1;
     for (const auto & r : results) {
         std::cerr << "[web-search] okunuyor (" << idx << "/" << results.size() << "): " << r.url << "\n";
         std::string excerpt = fetch_page_excerpt(r.url, max_chars_per_page);
         if (excerpt.empty()) excerpt = r.snippet;
-        oss << idx << ") " << r.title << " (" << r.url << ")\n" << excerpt << "\n\n";
+
+        if (idx > 1) data << ",";
+        data << "{\"result_id\":\"ws_" << idx << "\","
+             << "\"result_type\":\"web_page\","
+             << "\"source\":\"web_search\","
+             << "\"title\":\"" << json_escape(r.title) << "\","
+             << "\"url\":\"" << json_escape(r.url) << "\","
+             << "\"content\":\"" << json_escape(excerpt) << "\"}";
         ++idx;
     }
-    oss << "Yukaridaki kaynaklara dayanarak soruyu bir kere, net ve kisa sekilde cevapla. "
-        << "Arama yapma surecini anlatma, sadece cevabi yaz. "
-        << "Kaynaklarda bilgi yoksa bunu soyle, tahmin yurutme.";
-    return oss.str();
+    data << "]}";
+    obs.data_json = data.str();
+    return {obs};
 }
 
 // parse_special=true so structural markers like "<|im_start|>"/"<|im_end|>" in the
@@ -503,20 +660,23 @@ static mercan_token sample_token(
     return static_cast<mercan_token>(ranked[dist(rng)].second);
 }
 
-static constexpr const char * DEFAULT_SYSTEM_PROMPT =
-    "Sen Mercan'sın, MercanAI tarafından Türkçe konuşan kullanıcılar için geliştirilmiş "
-    "bir yapay zeka asistanısın. Sorulara açık, doğru ve anlaşılır bir Türkçeyle yanıt "
-    "verirsin; emin olmadığın konularda bunu açıkça belirtir, tahmini bilgiyi gerçek "
-    "gibi sunmazsın. Kısa sorulara kısa ve net, ayrıntı gerektiren sorulara ise "
-    "gerektiği kadar açıklayıcı cevaplar verirsin. Kullanıcıya karşı saygılı, sabırlı "
-    "ve yardımsever bir tutum sergilersin; zararlı, yasa dışı veya güvenlik açısından "
-    "tehlikeli isteklerde bulunulduğunda kibarca reddeder, bunun yerine güvenli ve "
-    "yapıcı bir alternatif sunmaya çalışırsın.";
+// Matches the labeled USER-turn template in build_labeled_content() (ORIGINAL_USER_PROMPT /
+// CONVERSATION_HISTORY_JSON / EXECUTOR_OBSERVATIONS_JSON).
+static constexpr const char * YARGI_SYSTEM_PROMPT =
+    "Sen Mercan agent pipeline'ında YARGI / response composer modelisin.\n"
+    "Sana kullanıcının orijinal isteği, varsa konuşma geçmişi ve GERÇEK executor/tool "
+    "observation sonuçları verilir.\n"
+    "Yalnızca doğrulanmış observation sonuçlarına dayanarak kullanıcıya nihai Türkçe cevabı "
+    "üret.\n"
+    "Araç başarısızsa başarılı olmuş gibi söyleme. Boş sonuç varsa bulunmuş gibi uydurma.\n"
+    "Ham executor JSON'unu, action/status/data gibi iç alanları veya pipeline ayrıntılarını "
+    "gereksiz yere kopyalama.\n"
+    "Birden fazla observation varsa nihai durumu doğru biçimde özetle.";
 
 struct run_options {
     std::string model;
     std::string prompt;
-    std::string system = DEFAULT_SYSTEM_PROMPT;
+    std::string system = YARGI_SYSTEM_PROMPT;
     std::string role_system = "sistem";
     std::string role_user = "kullanici";
     std::string role_assistant = "asistan";
@@ -721,32 +881,35 @@ static int command_run(int argc, char ** argv) {
         : "<|im_start|>" + opt.role_system + "\n" + opt.system + "<|im_end|>\n";
 
     if (!opt.prompt.empty()) {
-        std::string user_content = opt.prompt;
+        std::vector<tool_observation> observations;
         if (opt.web_search) {
-            const std::string context = build_web_context(opt.prompt, opt.web_results, opt.web_chars_per_page, opt.web_search_url);
-            if (!context.empty()) user_content = context + "\n\nKullanicinin sorusu: " + opt.prompt;
+            observations = build_web_observations(opt.prompt, opt.web_results, opt.web_chars_per_page, opt.web_search_url);
         }
-        const std::string formatted = system_prefix + "<|im_start|>" + opt.role_user + "\n" + user_content + "<|im_end|>\n<|im_start|>" + opt.role_assistant + "\n";
+        const std::string content = build_labeled_content(opt.prompt, {}, observations);
+        const std::string formatted = system_prefix + "<|im_start|>" + opt.role_user + "\n" + content + "<|im_end|>\n<|im_start|>" + opt.role_assistant + "\n";
         generate(model, opt, formatted);
         std::cout << "\n";
     } else {
         std::cout << "Mercan ready. Type /exit to quit.\n\n";
         std::string line;
-        std::string transcript = system_prefix;
+        std::vector<history_turn> history;
         while (true) {
             std::cout << "> " << std::flush;
             if (!std::getline(std::cin, line)) break;
             if (line == "/exit" || line == "/quit") break;
             if (line.empty()) continue;
-            std::string user_content = line;
+
+            std::vector<tool_observation> observations;
             if (opt.web_search) {
-                const std::string context = build_web_context(line, opt.web_results, opt.web_chars_per_page, opt.web_search_url);
-                if (!context.empty()) user_content = context + "\n\nKullanicinin sorusu: " + line;
+                observations = build_web_observations(line, opt.web_results, opt.web_chars_per_page, opt.web_search_url);
             }
-            transcript += "<|im_start|>" + opt.role_user + "\n" + user_content + "<|im_end|>\n<|im_start|>" + opt.role_assistant + "\n";
-            const std::string answer = generate(model, opt, transcript);
+            const std::string content = build_labeled_content(line, history, observations);
+            const std::string formatted = system_prefix + "<|im_start|>" + opt.role_user + "\n" + content + "<|im_end|>\n<|im_start|>" + opt.role_assistant + "\n";
+            const std::string answer = generate(model, opt, formatted);
             std::cout << "\n\n";
-            transcript += answer + "<|im_end|>\n";
+
+            history.push_back({"user", line});
+            history.push_back({"assistant", answer});
         }
     }
 
