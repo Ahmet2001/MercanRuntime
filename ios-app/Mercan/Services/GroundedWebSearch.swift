@@ -54,6 +54,9 @@ extension WebSearchService {
 
     /// Formats enriched evidence as the raw `araç` message body. URLs are kept
     /// next to every excerpt so the local model can ground claims to sources.
+    ///
+    /// Keep this deliberately compact: the default mobile runtime uses a 4K
+    /// context and still needs room for chat-template overhead plus generation.
     static func groundedToolResult(
         query: String,
         callID: String,
@@ -65,7 +68,7 @@ extension WebSearchService {
 
         var sections: [String] = []
         var totalCharacters = 0
-        let totalLimit = 10_500
+        let totalLimit = 4_500
 
         for (index, item) in evidence.enumerated() {
             guard totalCharacters < totalLimit else { break }
@@ -78,10 +81,10 @@ extension WebSearchService {
             let page = item.pageText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !page.isEmpty {
                 lines.append("Sayfa içeriği:")
-                lines.append(String(page.prefix(3_200)))
+                lines.append(String(page.prefix(1_500)))
             } else if !item.result.snippet.isEmpty {
                 lines.append("Arama özeti:")
-                lines.append(String(item.result.snippet.prefix(1_200)))
+                lines.append(String(item.result.snippet.prefix(700)))
             }
 
             var section = lines.joined(separator: "\n")
@@ -181,7 +184,7 @@ extension WebSearchService {
         guard text.count >= 120 else {
             throw WebSearchServiceError.invalidResponse
         }
-        return String(text.prefix(7_000))
+        return String(text.prefix(4_000))
     }
 
     private func firstCapturedHTML(in html: String, patterns: [String]) -> String? {
