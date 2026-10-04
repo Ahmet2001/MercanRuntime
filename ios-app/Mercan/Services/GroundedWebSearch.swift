@@ -52,11 +52,10 @@ extension WebSearchService {
         return text
     }
 
-    /// Formats enriched evidence as the raw `araç` message body. URLs are kept
-    /// next to every excerpt so the local model can ground claims to sources.
-    ///
-    /// Keep this deliberately compact: the default mobile runtime uses a 4K
-    /// context and still needs room for chat-template overhead plus generation.
+    /// Formats enriched evidence as the raw `araç` message body. Instead of
+    /// feeding long page prefixes, select short query-relevant sentences. This
+    /// both improves grounding density and makes verbatim page-copy behaviour
+    /// much less likely on the small local model.
     static func groundedToolResult(
         query: String,
         callID: String,
@@ -68,7 +67,7 @@ extension WebSearchService {
 
         var sections: [String] = []
         var totalCharacters = 0
-        let totalLimit = 4_500
+        let totalLimit = 3_600
 
         for (index, item) in evidence.enumerated() {
             guard totalCharacters < totalLimit else { break }
@@ -80,11 +79,14 @@ extension WebSearchService {
 
             let page = item.pageText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !page.isEmpty {
-                lines.append("Sayfa içeriği:")
-                lines.append(String(page.prefix(1_500)))
+                let excerpt = queryFocusedExcerpt(from: page, query: query, maxCharacters: 900)
+                if !excerpt.isEmpty {
+                    lines.append("İlgili kanıt:")
+                    lines.append(excerpt)
+                }
             } else if !item.result.snippet.isEmpty {
                 lines.append("Arama özeti:")
-                lines.append(String(item.result.snippet.prefix(700)))
+                lines.append(String(item.result.snippet.prefix(550)))
             }
 
             var section = lines.joined(separator: "\n")
@@ -97,6 +99,95 @@ extension WebSearchService {
         }
 
         return sections.joined(separator: "\n\n")
+    }
+
+    /// Detects when a proposed answer is mostly a verbatim replay of the tool
+    /// evidence. Legitimate short facts and titles are tolerated; repeated
+    /// eight-word shingles covering a large part of the answer trigger a rewrite.
+    static func looksLikeRawEvidenceDump(answer: String, toolBody: String) -> Bool {
+        let answerWords = normalizedWords(answer)
+        let evidence = normalizedWords(toolBody).joined(separator: " ")
+
+        guard answerWords.count >= 24, !evidence.isEmpty else { return false }
+
+        let shingleSize = 8
+        let possible = answerWords.count - shingleSize + 1
+        guard possible > 0 else { return false }
+
+        var matched = 0
+        var checked = 0
+        let strideSize = 4
+        var index = 0
+        while index + shingleSize <= answerWords.count {
+            let shingle = answerWords[index..<(index + shingleSize)].joined(separator: " ")
+            checked += 1
+            if evidence.contains(shingle) {
+                matched += 1
+            }
+            index += strideSize
+        }
+
+        guard checked >= 4 else { return false }
+        let ratio = Double(matched) / Double(checked)
+        return matched >= 4 && ratio >= 0.55
+    }
+
+    private static func normalizedWords(_ text: String) -> [String] {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+    }
+
+    private static func queryFocusedExcerpt(
+        from page: String,
+        query: String,
+        maxCharacters: Int
+    ) -> String {
+        let queryTerms = Set(
+            normalizedWords(query)
+                .filter { $0.count >= 3 }
+        )
+
+        let rawSentences = page
+            .replacingOccurrences(of: "\n", with: " ")
+            .components(separatedBy: CharacterSet(charactersIn: ".!?;"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 35 }
+
+        guard !rawSentences.isEmpty else {
+            return String(page.prefix(maxCharacters))
+        }
+
+        let scored: [(index: Int, score: Int, sentence: String)] = rawSentences.enumerated().map { index, sentence in
+            let words = Set(normalizedWords(sentence))
+            let overlap = queryTerms.intersection(words).count
+            // Prefer query overlap first; keep a light early-page prior for ties.
+            let earlyBonus = index < 6 ? 1 : 0
+            return (index, overlap * 10 + earlyBonus, sentence)
+        }
+
+        let ranked = scored
+            .sorted {
+                if $0.score == $1.score { return $0.index < $1.index }
+                return $0.score > $1.score
+            }
+            .prefix(5)
+            .sorted { $0.index < $1.index }
+
+        var selected: [String] = []
+        var count = 0
+        for item in ranked {
+            let remaining = maxCharacters - count
+            guard remaining > 0 else { break }
+            let sentence = item.sentence.count > remaining
+                ? String(item.sentence.prefix(remaining))
+                : item.sentence
+            selected.append(sentence)
+            count += sentence.count + 2
+        }
+
+        let result = selected.joined(separator: ". ")
+        return result.isEmpty ? String(page.prefix(maxCharacters)) : result
     }
 
     private func fetchReadablePageText(urlString: String) async throws -> String {
