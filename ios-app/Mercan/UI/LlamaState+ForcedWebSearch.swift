@@ -76,7 +76,7 @@ extension LlamaState {
 
         var inferenceMessages: [(role: String, content: String)] = []
         let groundingInstruction = """
-        Web araması uygulama tarafından kullanıcı isteği üzerine zaten tamamlandı. Son araç mesajındaki web kanıtlarını kullanarak şimdi kullanıcının sorusuna doğrudan nihai cevap ver. Yeni bir tool call, JSON veya araç isteği üretme. Araç sonucunda desteklenmeyen ayrıntıları uydurma; kanıt yetersizse bunu açıkça belirt.
+        Web araması uygulama tarafından kullanıcı isteği üzerine zaten tamamlandı. Son araç mesajındaki web kanıtlarını kullanarak kullanıcının sorusuna doğrudan nihai cevap ver. Yeni bir tool call, JSON veya araç isteği üretme. Kaynak metni ham biçimde kopyalama veya listeleme; bilgileri kendi cümlelerinle sentezle. Kaynaktan sekiz ardışık kelimeden uzun bir ifadeyi aynen tekrar etme. Araç sonucunda desteklenmeyen ayrıntıları uydurma; kanıt yetersizse bunu açıkça belirt.
         """
         let trimmedSystem = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         inferenceMessages.append((
@@ -226,12 +226,14 @@ extension LlamaState {
             contextTokenCount = tokenCount
 
             // Buffer each candidate before displaying it. This prevents a
-            // repeated synthetic tool-call JSON from ever reaching the UI.
+            // repeated synthetic tool-call JSON or raw evidence dump from ever
+            // reaching the UI.
             var finalRaw = ""
             var finalDisplay = ""
             var toolRetryCount = 0
             let maximumToolRetries = 2
             var directFallbackUsed = false
+            var evidenceRewriteUsed = false
 
             while !ForcedWebSearchRuntimeState.shared.cancelled && !Task.isCancelled {
                 await webEngine.clearGenerationState()
@@ -276,7 +278,7 @@ extension LlamaState {
                         inferenceMessages = [
                             (
                                 role: "system",
-                                content: "Web araması tamamlandı. Yalnızca nihai cevabı yaz. JSON, tool call veya araç çağrısı yazma. Web kanıtlarında olmayan ayrıntıları uydurma."
+                                content: "Web araması tamamlandı. Yalnızca nihai cevabı yaz. JSON, tool call veya araç çağrısı yazma. Kanıtı aynen kopyalama; bilgiyi kendi cümlelerinle sentezle. Web kanıtlarında olmayan ayrıntıları uydurma."
                             ),
                             (
                                 role: "user",
@@ -287,7 +289,7 @@ extension LlamaState {
                                 WEB ARAMA KANITLARI:
                                 \(toolBody)
 
-                                Yukarıdaki kanıtlara dayanarak soruyu doğrudan cevapla.
+                                Yukarıdaki kanıtlara dayanarak soruyu kendi cümlelerinle doğrudan cevapla. Kaynak metni olduğu gibi tekrar etme.
                                 """
                             )
                         ]
@@ -310,7 +312,7 @@ extension LlamaState {
                         inferenceMessages = [
                             (
                                 role: "system",
-                                content: "Web araması tamamlandı. Yalnızca nihai cevabı yaz; JSON veya tool call üretme."
+                                content: "Web araması tamamlandı. Yalnızca nihai cevabı yaz; JSON veya tool call üretme. Kaynak metni aynen kopyalama."
                             ),
                             (
                                 role: "user",
@@ -322,6 +324,38 @@ extension LlamaState {
                     }
 
                     finalDisplay = "Web araması tamamlandı ancak model boş bir nihai yanıt üretti."
+                    break
+                }
+
+                // The local 0.8B model occasionally mistakes the tool body for
+                // the desired response and replays it nearly verbatim. Reject
+                // that candidate before it reaches chat history and give the
+                // model one explicit synthesis/rewrite pass.
+                if WebSearchService.looksLikeRawEvidenceDump(answer: display, toolBody: toolBody) {
+                    if !evidenceRewriteUsed {
+                        inferenceMessages = [
+                            (
+                                role: "system",
+                                content: "Sen bir cevap sentezleyicisisin. Kaynak metni kopyalamak yasak. Yalnızca kullanıcının sorusuna cevap veren kısa ve doğal Türkçe bir yanıt yaz. Aynı kaynaktan sekiz ardışık kelimeyi aynen kullanma. URL, kaynak etiketi, 'İlgili kanıt' veya araç çıktısı formatını tekrar etme."
+                            ),
+                            (
+                                role: "user",
+                                content: """
+                                SORU:
+                                \(text)
+
+                                KANIT:
+                                \(toolBody)
+
+                                Bu kanıtı okuyup bilgiyi kendi cümlelerinle sentezle. Ham kanıtı veya web sayfası metnini tekrar yazma.
+                                """
+                            )
+                        ]
+                        evidenceRewriteUsed = true
+                        continue
+                    }
+
+                    finalDisplay = "Web kaynakları bulundu ancak model kaynak metnini doğrudan tekrar ettiği için ham içerik gösterilmedi."
                     break
                 }
 
