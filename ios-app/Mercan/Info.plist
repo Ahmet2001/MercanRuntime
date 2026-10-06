@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Mercan can transcribe audio on device.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Mercan uses the microphone only for on-device voice input.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Mercan needs access only when you choose a video from your photo library.</string>
+</dict>
+</plist>

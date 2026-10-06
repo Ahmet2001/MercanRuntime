@@ -1,17 +1,21 @@
-name: Build NedoLM iOS IPA
+name: Mercan iOS
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-    tags: ['ios-v*']
+    branches:
+      - main
+      - 'refactor/**'
+    tags:
+      - 'ios-v*'
     paths:
-      - ".github/workflows/nedolm-ios.yml"
-      - "scripts/**"
-      - "runtime/**"
+      - '.github/workflows/nedolm-ios.yml'
+      - 'ios-app/**'
+      - 'scripts/build-nedolm-llama-ios.sh'
+      - 'runtime/**'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -19,494 +23,68 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - name: Checkout mercanApp-test1
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate NedoLM runtime payload
-        shell: bash
+      - name: Prepare Mercan iOS frameworks
         run: |
-          set -euo pipefail
-          test -s runtime/nedolm/nedolm-llama.patch || {
-            echo "::error::runtime/nedolm/nedolm-llama.patch eksik"
-            exit 2
-          }
-          test -s runtime/nedo004-ffi/Cargo.toml || {
-            echo "::error::runtime/nedo004-ffi/Cargo.toml eksik"
-            exit 3
-          }
-          test -s runtime/nedo004-ffi/Cargo.lock || {
-            echo "::error::runtime/nedo004-ffi/Cargo.lock eksik"
-            exit 3
-          }
-          test -s runtime/nedolm/nedolm.cpp || {
-            echo "::error::runtime/nedolm/nedolm.cpp eksik"
-            exit 4
-          }
-          test -s runtime/nedolm/mercan_graph_ggml.hpp || {
-            echo "::error::runtime/nedolm/mercan_graph_ggml.hpp eksik"
-            exit 5
-          }
-          test -s runtime/libmercan/include/mercan_graph.h || {
-            echo "::error::runtime/libmercan/include/mercan_graph.h eksik"
-            exit 6
-          }
-          test -s runtime/libmercan/include/mercan_tensor.h || {
-            echo "::error::runtime/libmercan/include/mercan_tensor.h eksik"
-            exit 7
-          }
+          chmod +x ios-app/scripts/*.sh
+          ios-app/scripts/prepare-frameworks.sh
 
-      - name: Build current NDSRF004 FFI for iPhone arm64
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustc --version
-          cargo --version
-          rustup target add aarch64-apple-ios
-          cargo build \
-            --manifest-path runtime/nedo004-ffi/Cargo.toml \
-            --locked \
-            --release \
-            --target aarch64-apple-ios
-          FFI="$GITHUB_WORKSPACE/runtime/nedo004-ffi/target/aarch64-apple-ios/release/libnedo004_ffi.a"
-          test -s "$FFI"
-          file "$FFI"
+      - name: Build unsigned validation IPA
+        run: ios-app/scripts/build-unsigned.sh
 
-      - name: Clone Silo
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone https://github.com/stevederico/silo.git work/silo
-          cd work/silo
-          git checkout 1be4fa9aad0ec72dbb6f40ac07d537ea16648944
-
-      - name: Configure Silo as Mercan iOS
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY2'
-          from pathlib import Path
-          import plistlib
-
-          state = Path('work/silo/Silo/UI/LlamaState.swift')
-          text = state.read_text()
-          start = text.index('    static let defaultModel = Model(')
-          end = text.index('    static let lfmSimulatorModel = Model(', start)
-          mercan = (
-              '    static let defaultModel = Model(\n'
-              '        name: "Mercan 0.8B SFT Q4_K_M (482 MiB)",\n'
-              '        url: "https://huggingface.co/MercanAI/Mercan-0.8B-SFT/resolve/main/model.mercan?download=true",\n'
-              '        filename: "Mercan-0.8B-SFT.gguf",\n'
-              '        status: "download",\n'
-              '        released: catalogDate(2026, 9, 11))\n\n'
-          )
-          text = text[:start] + mercan + text[end:]
-          req = '    let modelRequirements: [String: Double] = [\n'
-          if req in text:
-              text = text.replace(req, req + '        "Mercan 0.8B SFT Q4_K_M (482 MiB)": 1.2,\n', 1)
-          state.write_text(text)
-
-          plist_path = Path('work/silo/Silo/Info.plist')
-          info = plistlib.loads(plist_path.read_bytes())
-          info['CFBundleDisplayName'] = 'Mercan'
-          info['NSMicrophoneUsageDescription'] = 'Mercan uses the microphone only for on-device voice input.'
-          info['NSSpeechRecognitionUsageDescription'] = 'Mercan can transcribe audio on device.'
-          plist_path.write_bytes(plistlib.dumps(info, sort_keys=False))
-          PY2
-          grep -q 'MercanAI/Mercan-0.8B-SFT' work/silo/Silo/UI/LlamaState.swift
-          grep -q 'Mercan-0.8B-SFT.gguf' work/silo/Silo/UI/LlamaState.swift
-
-      - name: Clone and patch llama.cpp
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone https://github.com/ggml-org/llama.cpp.git work/llama.cpp
-          cd work/llama.cpp
-          git checkout e71b80510c848c00175924ecf3c40333ccae8eb5
-          git apply --check "$GITHUB_WORKSPACE/runtime/nedolm/nedolm-llama.patch"
-          git apply "$GITHUB_WORKSPACE/runtime/nedolm/nedolm-llama.patch"
-
-          cp "$GITHUB_WORKSPACE/runtime/nedolm/nedolm.cpp" src/models/nedolm.cpp
-          cp "$GITHUB_WORKSPACE/runtime/libmercan/include/mercan_tensor.h" src/models/mercan_tensor.h
-          cp "$GITHUB_WORKSPACE/runtime/libmercan/include/mercan_graph.h" src/models/mercan_graph.h
-          cp "$GITHUB_WORKSPACE/runtime/nedolm/mercan_graph_ggml.hpp" src/models/mercan_graph_ggml.hpp
-
-          # Silo was compiled against an older llama C ABI. Keep Silo's original
-          # headers (so they remain compatible with whisper's ggml headers), and
-          # cross the changed by-value structs through these scalar/pointer-only
-          # wrappers compiled against the exact e71b805 llama ABI.
-          cat > src/nedolm-silo-abi.cpp <<'CPP'
-          #include "llama.h"
-
-          extern "C" struct llama_model * nedolm_silo_model_load_from_file(
-                  const char * path_model,
-                  llama_progress_callback progress_callback,
-                  void * progress_callback_user_data) {
-              auto params = llama_model_default_params();
-              params.progress_callback = progress_callback;
-              params.progress_callback_user_data = progress_callback_user_data;
-              return llama_model_load_from_file(path_model, params);
-          }
-
-          extern "C" struct llama_context * nedolm_silo_context_init(
-                  struct llama_model * model,
-                  uint32_t n_ctx,
-                  int32_t n_threads,
-                  int32_t n_threads_batch) {
-              auto params = llama_context_default_params();
-              params.n_ctx = n_ctx;
-              params.n_threads = n_threads;
-              params.n_threads_batch = n_threads_batch;
-              return llama_init_from_model(model, params);
-          }
-
-          extern "C" struct llama_sampler * nedolm_silo_create_sampler_chain(
-                  const struct llama_model * model) {
-              auto * chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
-              if (chain == nullptr || model == nullptr) {
-                  return chain;
-              }
-
-              const struct llama_vocab * vocab = llama_model_get_vocab(model);
-              if (vocab == nullptr) {
-                  llama_sampler_free(chain);
-                  return nullptr;
-              }
-
-              llama_sampler_chain_add(chain, llama_sampler_init_greedy());
-              return chain;
-          }
-          CPP
-
-          mkdir -p vendor/nedo004-ffi/target/release
-          cp "$GITHUB_WORKSPACE/runtime/nedo004-ffi/target/aarch64-apple-ios/release/libnedo004_ffi.a" \
-             vendor/nedo004-ffi/target/release/libnedo004_ffi.a
-
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('src/CMakeLists.txt')
-          s = p.read_text()
-          old = 'target_link_libraries(llama PRIVATE nedo004_ffi dl pthread m)'
-          new = 'target_link_libraries(llama PRIVATE nedo004_ffi)\ntarget_sources(llama PRIVATE nedolm-silo-abi.cpp)'
-          if old not in s:
-              raise SystemExit('NedoLM FFI CMake linkage anchor not found')
-          p.write_text(s.replace(old, new, 1))
-          PY
-
-      - name: Build NedoLM llama framework for iPhone arm64
-        id: llama_build
-        shell: bash
-        run: |
-          set -uo pipefail
-          chmod +x scripts/build-nedolm-llama-ios.sh
-          set +e
-          scripts/build-nedolm-llama-ios.sh \
-            "$GITHUB_WORKSPACE/work/llama.cpp" \
-            "$GITHUB_WORKSPACE/runtime/nedo004-ffi/target/aarch64-apple-ios/release/libnedo004_ffi.a" \
-            "$GITHUB_WORKSPACE/work/nedolm-llama.xcframework" \
-            2>&1 | tee "$GITHUB_WORKSPACE/work/llama-framework-build.log"
-          status=${PIPESTATUS[0]}
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-          exit 0
-
-      - name: Collect llama framework diagnostics
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          mkdir -p work/diagnostics/llama
-          cp work/llama-framework-build.log work/diagnostics/llama/ 2>/dev/null || true
-          {
-            echo "=== Generated NedoLM XCFramework layout ==="
-            find work/nedolm-llama.xcframework -maxdepth 5 -print 2>/dev/null | sort || true
-            echo
-            echo "=== Generated module maps ==="
-            find work/nedolm-llama.xcframework -name module.modulemap -type f -print 2>/dev/null | sort || true
-            echo
-            echo "=== Generated headers ==="
-            find work/nedolm-llama.xcframework -path '*/Headers/*' -type f -print 2>/dev/null | sort || true
-            echo
-            echo "=== Pinned Silo XCFramework layout ==="
-            find work/silo/llama.xcframework -maxdepth 4 -print 2>/dev/null | sort || true
-          } > work/diagnostics/llama/framework-layout.txt
-          while IFS= read -r map; do
-            safe="$(echo "$map" | tr '/ ' '__')"
-            cp "$map" "work/diagnostics/llama/${safe}" 2>/dev/null || true
-          done < <(find work/nedolm-llama.xcframework work/silo/llama.xcframework -name module.modulemap -type f -print 2>/dev/null)
-
-      - name: Upload llama framework diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: NedoLM-Llama-Framework-Diagnostics
-          path: work/diagnostics/llama
-          if-no-files-found: warn
-          retention-days: 3
-
-      - name: Stop on llama framework failure
-        if: steps.llama_build.outputs.status != '0'
-        shell: bash
-        run: |
-          echo "::error::NedoLM llama iPhone arm64 framework build failed. See NedoLM-Llama-Framework-Diagnostics."
-          exit 1
-
-      - name: Install NedoLM binary with Silo ABI bridge
-        shell: bash
-        run: |
-          set -euo pipefail
-          SRC_FW="$GITHUB_WORKSPACE/work/nedolm-llama.xcframework/ios-arm64/llama.framework"
-          DST_FW="$GITHUB_WORKSPACE/work/silo/llama.xcframework/ios-arm64/llama.framework"
-          SWIFT="$GITHUB_WORKSPACE/work/silo/Silo/Inference/LibLlama.swift"
-
-          test -s "$SRC_FW/llama"
-          test -s "$DST_FW/llama"
-          test -s "$DST_FW/Info.plist"
-          test -s "$DST_FW/Modules/module.modulemap"
-          test -s "$DST_FW/Headers/llama.h"
-          test -s "$SWIFT"
-
-          MODULE_SHA_BEFORE="$(shasum -a 256 "$DST_FW/Modules/module.modulemap" | awk '{print $1}')"
-          INFO_SHA_BEFORE="$(shasum -a 256 "$DST_FW/Info.plist" | awk '{print $1}')"
-
-          # Swap only the executable. Keep Silo's pinned llama/ggml headers so the
-          # Clang module still agrees with whisper.framework's ggml definitions.
-          cp "$SRC_FW/llama" "$DST_FW/llama"
-          chmod +x "$DST_FW/llama"
-
-          # Expose only the scalar/pointer ABI bridge in the old llama header.
-          python3 - <<'PY'
-          from pathlib import Path
-
-          header = Path('work/silo/llama.xcframework/ios-arm64/llama.framework/Headers/llama.h')
-          s = header.read_text()
-          if '#define LLAMA_SESSION_VERSION 9' not in s:
-              raise SystemExit('Expected pinned Silo llama ABI v9 header')
-          marker = '#ifdef __cplusplus\n}\n#endif\n\n#endif // LLAMA_H'
-          if marker not in s:
-              raise SystemExit('Could not find llama.h closing marker')
-          bridge = r'''
-              // NedoLM/Silo ABI bridge. Implemented by the e71b805 NedoLM binary.
-              // These functions avoid passing version-sensitive llama parameter structs
-              // by value across Silo's older Clang-imported C ABI.
-              LLAMA_API struct llama_model * nedolm_silo_model_load_from_file(
-                      const char * path_model,
-                      llama_progress_callback progress_callback,
-                      void * progress_callback_user_data);
-
-              LLAMA_API struct llama_context * nedolm_silo_context_init(
-                      struct llama_model * model,
-                      uint32_t n_ctx,
-                      int32_t n_threads,
-                      int32_t n_threads_batch);
-
-              LLAMA_API struct llama_sampler * nedolm_silo_create_sampler_chain(
-                      const struct llama_model * model);
-          '''.strip('\n')
-          header.write_text(s.replace(marker, bridge + '\n\n' + marker, 1))
-          PY
-
-          # Route only the version-sensitive calls through the bridge. The rest of
-          # LibLlama keeps using Silo's original stable C declarations.
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path('work/silo/Silo/Inference/LibLlama.swift')
-          s = p.read_text()
-
-          old_sampler = '''        let sparams = llama_sampler_chain_default_params()
-                  self.sampling = llama_sampler_chain_init(sparams)
-                  llama_sampler_chain_add(self.sampling, llama_sampler_init_top_k(40))
-                  llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.7))
-                  llama_sampler_chain_add(self.sampling, llama_sampler_init_min_p(0.05, 1))
-                  llama_sampler_chain_add(self.sampling, llama_sampler_init_penalties(64, 1.1, 0.0, 0.0))
-                  llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(1234))
-                  vocab = llama_model_get_vocab(model)'''.replace('                  ', '        ')
-          new_sampler = '''        guard let sampling = nedolm_silo_create_sampler_chain(model) else {
-                      fatalError("Could not initialize NedoLM sampler chain")
-                  }
-                  self.sampling = sampling
-                  vocab = llama_model_get_vocab(model)'''.replace('                  ', '        ')
-          if old_sampler not in s:
-              raise SystemExit('Sampler initialization anchor not found in LibLlama.swift')
-          s = s.replace(old_sampler, new_sampler, 1)
-
-          start = s.index('        var model_params = llama_model_default_params()')
-          end_anchor = '        guard let model else {'
-          end = s.index(end_anchor, start)
-          old_model_block = s[start:end]
-          new_model_block = '''        let model: OpaquePointer?
-                  if let onProgress {
-                      let ctx = ProgressCallbackContext(onProgress)
-                      let rawPtr = Unmanaged.passRetained(ctx).toOpaque()
-                      model = nedolm_silo_model_load_from_file(path, { progress, userData in
-                          if let userData {
-                              let ctx = Unmanaged<ProgressCallbackContext>.fromOpaque(userData).takeUnretainedValue()
-                              ctx.handler(progress)
-                          }
-                          return true
-                      }, rawPtr)
-                      Unmanaged<ProgressCallbackContext>.fromOpaque(rawPtr).release()
-                  } else {
-                      model = nedolm_silo_model_load_from_file(path, nil, nil)
-                  }
-
-          '''.replace('                  ', '        ')
-          s = s[:start] + new_model_block + s[end:]
-
-          ctx_start = s.index('        var ctx_params = llama_context_default_params()')
-          ctx_end_anchor = '        guard let context else {'
-          ctx_end = s.index(ctx_end_anchor, ctx_start)
-          old_ctx_block = s[ctx_start:ctx_end]
-          effective_start = old_ctx_block.index('        #if targetEnvironment(simulator)')
-          effective_block = old_ctx_block[effective_start:]
-          # Keep the existing effectiveContext conditional, remove the old params
-          # mutations, then initialize through the new-ABI wrapper.
-          lines = effective_block.splitlines()
-          kept = []
-          in_conditional = True
-          for line in lines:
-              if in_conditional:
-                  kept.append(line)
-                  if line.strip() == '#endif':
-                      in_conditional = False
-          new_ctx_block = '\n'.join(kept) + '''
-                  let context = nedolm_silo_context_init(
-                      model,
-                      effectiveContext,
-                      Int32(n_threads),
-                      Int32(n_threads)
-                  )
-          '''.replace('                  ', '        ')
-          s = s[:ctx_start] + new_ctx_block + s[ctx_end:]
-
-          forbidden = [
-              'llama_model_default_params()',
-              'llama_context_default_params()',
-              'llama_sampler_chain_default_params()',
-              'llama_sampler_init_penalties(64,',
-          ]
-          for needle in forbidden:
-              if needle in s:
-                  raise SystemExit(f'Old ABI-sensitive call still present: {needle}')
-
-          p.write_text(s)
-          PY
-
-          grep -q 'nedolm_silo_model_load_from_file' "$DST_FW/Headers/llama.h"
-          grep -q 'nedolm_silo_context_init' "$DST_FW/Headers/llama.h"
-          grep -q 'nedolm_silo_create_sampler_chain' "$DST_FW/Headers/llama.h"
-          grep -q 'nedolm_silo_model_load_from_file' "$SWIFT"
-          grep -q 'nedolm_silo_context_init' "$SWIFT"
-          grep -q 'nedolm_silo_create_sampler_chain' "$SWIFT"
-
-          MODULE_SHA_AFTER="$(shasum -a 256 "$DST_FW/Modules/module.modulemap" | awk '{print $1}')"
-          INFO_SHA_AFTER="$(shasum -a 256 "$DST_FW/Info.plist" | awk '{print $1}')"
-          test "$MODULE_SHA_BEFORE" = "$MODULE_SHA_AFTER"
-          test "$INFO_SHA_BEFORE" = "$INFO_SHA_AFTER"
-
-          echo "Pinned Silo modulemap SHA256: $MODULE_SHA_AFTER"
-          echo "Pinned Silo framework Info.plist SHA256: $INFO_SHA_AFTER"
-          file "$DST_FW/llama"
-          lipo -info "$DST_FW/llama"
-          otool -L "$DST_FW/llama"
-          nm -gU "$DST_FW/llama" | grep 'nedolm_silo_'
-
-      - name: Repair pinned Silo whisper XCFramework debug-symbol paths
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import plistlib
-          from pathlib import Path
-
-          xc = Path('work/silo/whisper.xcframework')
-          info_path = xc / 'Info.plist'
-          info = plistlib.loads(info_path.read_bytes())
-          created = []
-          for lib in info.get('AvailableLibraries', []):
-              debug_path = lib.get('DebugSymbolsPath')
-              identifier = lib.get('LibraryIdentifier')
-              if not debug_path or not identifier:
-                  continue
-              path = xc / identifier / debug_path
-              path.mkdir(parents=True, exist_ok=True)
-              created.append(str(path))
-          if not created:
-              raise SystemExit('whisper.xcframework declares no DebugSymbolsPath entries')
-          print('Prepared declared whisper debug-symbol paths:')
-          print('\n'.join(created))
-          PY
-
-      - name: Build unsigned Silo app for device
-        id: silo_build
-        shell: bash
-        run: |
-          set -uo pipefail
-          cd work/silo
-          set +e
-          xcodebuild \
-            -project Silo.xcodeproj \
-            -scheme Silo \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$GITHUB_WORKSPACE/work/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            DEVELOPMENT_TEAM="" \
-            build 2>&1 | tee "$GITHUB_WORKSPACE/work/xcodebuild.log"
-          status=${PIPESTATUS[0]}
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-          exit 0
-
-      - name: Upload Xcode diagnostics
-        if: always() && steps.llama_build.outputs.status == '0'
-        uses: actions/upload-artifact@v4
-        with:
-          name: NedoLM-Xcode-Diagnostics
-          path: work/xcodebuild.log
-          if-no-files-found: warn
-          retention-days: 3
-
-      - name: Stop on Silo build failure
-        if: steps.silo_build.outputs.status != '' && steps.silo_build.outputs.status != '0'
-        shell: bash
-        run: |
-          echo "::error::Unsigned Silo iPhone build failed. See NedoLM-Xcode-Diagnostics."
-          exit 1
-
-      - name: Package unsigned IPA
-        shell: bash
-        run: |
-          set -euo pipefail
-          APP="$(find work/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -print -quit)"
-          test -n "$APP"
-          rm -rf work/Payload
-          mkdir -p work/Payload
-          cp -R "$APP" work/Payload/
-          (
-            cd work
-            /usr/bin/zip -qry Mercan-iOS-unsigned.ipa Payload
-          )
-          shasum -a 256 work/Mercan-iOS-unsigned.ipa
-
-      - name: Upload IPA
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: Mercan-iOS-unsigned-IPA
-          path: work/Mercan-iOS-unsigned.ipa
+          path: build/ios/Mercan-iOS-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
 
+      - name: Import Apple distribution certificate
+        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' }}
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPSTORE_CERTIFICATES_FILE_BASE64 }}
+          p12-password: ${{ secrets.APPSTORE_CERTIFICATES_PASSWORD }}
 
-      - name: Publish iOS GitHub Release
-        if: startsWith(github.ref, 'refs/tags/ios-v')
-        shell: bash
+      - name: Download App Store provisioning profile
+        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' }}
+        uses: apple-actions/download-provisioning-profiles@v6
+        with:
+          bundle-id: ${{ vars.IOS_BUNDLE_ID }}
+          profile-type: IOS_APP_STORE
+          issuer-id: ${{ vars.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ vars.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+
+      - name: Archive signed App Store build
+        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' }}
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
-            --title "Mercan iOS $GITHUB_REF_NAME" \
-            --generate-notes \
-            work/Mercan-iOS-unsigned.ipa
+          IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          IOS_BUILD_NUMBER: ${{ github.run_number }}
+          IOS_MARKETING_VERSION: 0.1.0
+        run: ios-app/scripts/archive-appstore.sh
+
+      - name: Upload signed IPA artifact
+        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mercan-iOS-AppStore-IPA
+          path: build/ios/Mercan-AppStore.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload to TestFlight
+        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' }}
+        uses: apple-actions/upload-testflight-build@v5
+        with:
+          app-path: build/ios/Mercan-AppStore.ipa
+          issuer-id: ${{ vars.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ vars.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          uses-non-exempt-encryption: 'false'
+          wait-for-processing: 'true'
+          backend: AppStoreAPI

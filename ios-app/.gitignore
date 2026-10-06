@@ -1,0 +1,4 @@
+llama.xcframework/
+whisper.xcframework/
+DerivedData/
+ExportOptions.plist
