@@ -110,4 +110,5 @@ install(FILES
     runtime/libmercan/include/mercan_graph.h
     runtime/libmercan/include/mercan_kv.h
     runtime/libmercan/include/mercan_plugin.h
+    runtime/nedo004-ffi/include/nedo004.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

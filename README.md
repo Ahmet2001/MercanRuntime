@@ -184,3 +184,13 @@ See `docs/ARCHITECTURE_SDK.md`, `docs/GRAPH_ABI_V1.md` and `examples/custom_arch
 ## Current v1 scope
 
 Mercan v1 includes the portable model format, converter, exact tokenizer bridge, native runtime ABI, Architecture/Tokenizer SDK registries, experimental Graph ABI v1, local/Hugging Face CLI workflow and Linux packaging. An HTTP server/API layer and stable external shared-object plugin loader are intentionally left for later stages.
+
+## Standalone NedoTokenizer SDK
+
+The original NDSRF004 Rust tokenizer now exports a model-free, copy-based C
+API in `runtime/nedo004-ffi/include/nedo004.h`.
+Build a standalone shared library with
+`cargo build --release --manifest-path runtime/nedo004-ffi/Cargo.toml`.
+It supports encode, byte-exact decode, vocabulary size, and vocabulary SHA-256,
+without loading Mercan or an LLM. The tokenizer remains the exact Rust
+NedoTokenizer: no alternate segmentation algorithm has been introduced.

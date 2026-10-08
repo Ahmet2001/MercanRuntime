@@ -189,3 +189,116 @@ mod tests {
         assert_eq!(s.sha256, EMBEDDED_SHA256);
     }
 }
+
+// Independent NDSRF004 ABI for SDK clients that do not have a loaded LLM.
+// Return codes: 0 success, -1 bad arguments, -2 state unavailable,
+// -3 encode/decode failure, -4 output buffer too small.
+// out_len is always set to the required size when available.
+#[no_mangle]
+pub extern "C" fn nedo004_vocab_size() -> u32 {
+    state().map(|s| s.vocabulary.len() as u32).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nedo004_encode_copy(
+    data: *const u8,
+    len: usize,
+    output: *mut u16,
+    capacity: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() || (len != 0 && data.is_null()) ||
+        (capacity != 0 && output.is_null()) {
+        return -1;
+    }
+    *out_len = 0;
+    let mut count = 0usize;
+    let ids = nedo004_encode(data, len, &mut count);
+    if ids.is_null() {
+        return -2;
+    }
+    *out_len = count;
+    if capacity < count {
+        return -4;
+    }
+    if count > 0 {
+        std::ptr::copy_nonoverlapping(ids, output, count);
+    }
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nedo004_decode_copy(
+    ids: *const u16,
+    len: usize,
+    output: *mut u8,
+    capacity: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if out_len.is_null() || (len != 0 && ids.is_null()) ||
+        (capacity != 0 && output.is_null()) {
+        return -1;
+    }
+    *out_len = 0;
+    let st = match state() {
+        Ok(s) => s,
+        Err(_) => return -2,
+    };
+    let tokens: &[u16] = if len == 0 { &[] } else { slice::from_raw_parts(ids, len) };
+    let bytes = match st.vocabulary.decode_ids(tokens) {
+        Ok(v) => v,
+        Err(_) => return -3,
+    };
+    *out_len = bytes.len();
+    if capacity < bytes.len() {
+        return -4;
+    }
+    if !bytes.is_empty() {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), output, bytes.len());
+    }
+    0
+}
+
+#[cfg(test)]
+mod independent_ffi_tests {
+    use super::*;
+
+    #[test]
+    fn byte_exact_round_trip() {
+        let raw = "Merhaba, nasılsın? İstanbul 😀".as_bytes();
+        let mut count = 0_usize;
+        let requested = unsafe {
+            nedo004_encode_copy(raw.as_ptr(), raw.len(), std::ptr::null_mut(), 0, &mut count)
+        };
+        assert_eq!(requested, -4);
+        assert!(count > 0);
+        let mut ids = vec![0u16; count];
+        assert_eq!(
+            unsafe { nedo004_encode_copy(raw.as_ptr(), raw.len(), ids.as_mut_ptr(), ids.len(), &mut count) },
+            0,
+        );
+        let mut out_size = 0_usize;
+        assert_eq!(
+            unsafe { nedo004_decode_copy(ids.as_ptr(), ids.len(), std::ptr::null_mut(), 0, &mut out_size) },
+            -4,
+        );
+        let mut out = vec![0u8; out_size];
+        assert_eq!(
+            unsafe { nedo004_decode_copy(ids.as_ptr(), ids.len(), out.as_mut_ptr(), out.len(), &mut out_size) },
+            0,
+        );
+        assert_eq!(out, raw);
+        assert_eq!(nedo004_vocab_size(), 32_000);
+        assert_eq!(unsafe { CStr::from_ptr(nedo004_vocab_sha256()) }.to_str().unwrap(), EMBEDDED_SHA256);
+    }
+
+    #[test]
+    fn bad_decode_id_fails_without_crashing() {
+        let mut count = 0_usize;
+        let invalid = [u16::MAX];
+        assert_eq!(
+            unsafe { nedo004_decode_copy(invalid.as_ptr(), 1, std::ptr::null_mut(), 0, &mut count) },
+            -3,
+        );
+    }
+}

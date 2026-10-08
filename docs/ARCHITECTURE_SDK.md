@@ -215,3 +215,28 @@ are loaded by Mercan's generic GGUF/ggml backend adapter. The adapter loads name
 executes the resulting graph without requiring a compiled llama.cpp model class for that architecture.
 
 The `anka` example also registers an external `anka-byte` tokenizer. The SDK regression builds a tiny Anka `.mercan` transformer and verifies `plugin load -> model load -> tokenize -> prefill -> cached decode -> logits`. The test compares a cached context against a fresh context decoding the same token, so a passing result proves that retained K/V history changes the logits. CPU is the baseline; when a GPU device is available and `n_gpu_layers != 0`, the same generic adapter runs the graph and persistent cache path on that ggml GPU backend.
+
+## Standalone NedoTokenizer (NDSRF004) SDK
+
+The Nedo tokenizer can now run **without loading a model** through the
+original Rust FFI library. The Mercan C SDK installs `nedo004.h`; the Rust
+`nedo004-ffi` Cargo crate produces a static library **and** a shared library
+(`libnedo004_ffi.so` / `libnedo004_ffi.dylib` / `nedo004_ffi.dll`).
+
+```bash
+cargo build --release --manifest-path runtime/nedo004-ffi/Cargo.toml
+cargo test --release --manifest-path runtime/nedo004-ffi/Cargo.toml
+```
+
+Functions: `nedo004_encode_copy`, `nedo004_decode_copy`,
+`nedo004_vocab_size` and `nedo004_vocab_sha256`. The buffer-size query
+uses `-4` for insufficient capacity; `out_len` reports required length.
+Tokenization uses the exact built-in 32,000-entry NDSRF004 surface vocabulary
+and the original morphological tokenizer implementation. BOS/EOS are excluded
+from encoded user text, as in the existing native bridge. Decoding reconstructs
+UTF-8 bytes, including Turkish text and byte fallbacks. This is a standalone
+API next to `mercan_tokenizer_v1`, which remains unchanged for plugin ABI v1.
+
+The shared Rust tokenizer is independent of libmercan and llama.cpp. It can
+be consumed by Python (EthosoftLib's optional `ethosoftlib.nedo` adapter)
+or other SDK clients. Existing model inference/tokenizer behavior is unchanged.
