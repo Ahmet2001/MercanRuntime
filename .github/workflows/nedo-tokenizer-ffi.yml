@@ -1,0 +1,30 @@
+name: NedoTokenizer standalone Rust ABI
+
+on:
+  push:
+    branches: [main, feature/standalone-nedo-tokenizer-sdk]
+    paths:
+      - 'runtime/nedo004-ffi/**'
+      - 'runtime/NedoTokenizer/**'
+      - '.github/workflows/nedo-tokenizer-ffi.yml'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust ABI unit tests (including exact vocab and round-trip)
+        run: cargo test --manifest-path runtime/nedo004-ffi/Cargo.toml
+      - name: Build shared library
+        run: |
+          cargo build --release --manifest-path runtime/nedo004-ffi/Cargo.toml
+          test -s runtime/nedo004-ffi/target/release/libnedo004_ffi.so
+          nm -D runtime/nedo004-ffi/target/release/libnedo004_ffi.so | grep ' nedo004_encode_copy'
+          nm -D runtime/nedo004-ffi/target/release/libnedo004_ffi.so | grep ' nedo004_decode_copy'
