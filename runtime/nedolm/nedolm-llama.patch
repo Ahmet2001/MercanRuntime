@@ -2,16 +2,25 @@ diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 index 221e14f7f..4b7344a38 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -60,6 +60,15 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+@@ -60,6 +60,24 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
  
  target_link_libraries(llama PUBLIC ggml)
  
-+# NedoLM exact NDSRF004 tokenizer bridge.
-+set(NEDO004_FFI_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/nedo004-ffi/target/release/libnedo004_ffi.a")
++# NedoLM exact NDSRF004 Rust staticlib for each OS.
++if (WIN32)
++    set(NEDO004_FFI_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/nedo004-ffi/target/release/nedo004_ffi.lib")
++else()
++    set(NEDO004_FFI_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../vendor/nedo004-ffi/target/release/libnedo004_ffi.a")
++endif()
 +if (EXISTS "${NEDO004_FFI_LIB}")
 +    add_library(nedo004_ffi STATIC IMPORTED GLOBAL)
 +    set_target_properties(nedo004_ffi PROPERTIES IMPORTED_LOCATION "${NEDO004_FFI_LIB}")
-+    target_link_libraries(llama PRIVATE nedo004_ffi dl pthread m)
++    target_link_libraries(llama PRIVATE nedo004_ffi ${CMAKE_DL_LIBS})
++    if (WIN32)
++        target_link_libraries(llama PRIVATE ws2_32 userenv bcrypt ntdll)
++    else()
++        target_link_libraries(llama PRIVATE pthread m)
++    endif()
 +    target_compile_definitions(llama PRIVATE LLAMA_NEDO004_FFI=1)
 +endif()
 +
