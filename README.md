@@ -1,4 +1,13 @@
 <p align="center">
+  <a href="https://mercan.ethosoft.org">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand-dark.svg">
+      <img src="docs/assets/brand-light.svg" alt="Mercan · Ethosoft" height="56">
+    </picture>
+  </a>
+</p>
+
+<p align="center">
   <img src="docs/assets/mercan-hero.svg" alt="Mercan — a rotating 3D coral made of particles" width="880">
 </p>
 
