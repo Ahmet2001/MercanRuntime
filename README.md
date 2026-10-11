@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/mercan-hero.webp" alt="Mercan — logo dissolving into a rotating 3D coral made of particles" width="880">
+  <img src="docs/assets/mercan-hero.svg" alt="Mercan — a rotating 3D coral made of particles" width="880">
 </p>
 
 # Mercan
