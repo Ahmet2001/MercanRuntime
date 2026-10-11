@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/mercan-hero.webp" alt="Mercan — logo dissolving into a rotating 3D coral made of particles" width="880">
+</p>
+
 # Mercan
 
 Mercan is a native local inference stack for Mercan/NedoLM models. The user-facing workflow is intentionally simple:
