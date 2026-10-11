@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # Docs-only changes skip the ~1h build; tag pushes ignore path filters.
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
 
 permissions:
