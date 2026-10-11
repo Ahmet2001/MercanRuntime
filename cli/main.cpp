@@ -638,8 +638,8 @@ static void print_help() {
         << "  --gpu-layers N          GPU layers (-1 = all; CUDA build defaults to -1)\n\n"
         << "Examples:\n"
         << "  mercan run model.mercan\n"
-        << "  mercan run Ahmet2001/Mercan-0.8B-SFT\n"
-        << "  mercan run Ahmet2001/Mercan-0.8B-SFT:model-q4.mercan -p \"Merhaba\"\n"
+        << "  mercan run MercanAI/Mercan-0.8B-SFT\n"
+        << "  mercan run MercanAI/Mercan-0.8B-SFT:model.mercan -p \"Merhaba\"\n"
         << "  mercan run model.mercan -s \"Sen yardımsever bir asistansın.\" -p \"Merhaba\"\n"
         << "  mercan run model.mercan --web-search -p \"Bugün hava durumu nasıl?\"\n";
 }
