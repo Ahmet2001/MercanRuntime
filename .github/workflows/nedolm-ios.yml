@@ -107,7 +107,67 @@ jobs:
           req = '    let modelRequirements: [String: Double] = [\n'
           if req in text:
               text = text.replace(req, req + '        "Mercan 0.8B SFT Q4_K_M (482 MiB)": 1.2,\n', 1)
-          state.write_text(text)
+
+          def replace_once(src, old, new, label):
+              if src.count(old) != 1:
+                  raise SystemExit(f'Silo anchor not found: {label}')
+              return src.replace(old, new, 1)
+
+          # Same default system prompt as the mercan CLI (cli/main.cpp).
+          default_prompt = (
+              'Türkçe, doğal ve kısa yanıt ver. Kullanıcı ayrıntı istemedikçe en fazla bir kısa '
+              'cümle yaz; cevabı verdikten sonra dur. Yalnızca sorulanı yanıtla. Selamlaşmaya '
+              'kısa bir selamla karşılık ver. Kendini tanıtma, takip sorusu sorma, liste, örnek '
+              'veya yeni konu ekleme. Bilmediğin şeyi uydurma; tehlikeli isteklere kısa ve '
+              'güvenli yanıt ver.'
+          )
+          text = replace_once(text,
+              'self.systemPrompt = UserDefaults.standard.string(forKey: "systemPrompt") ?? ""',
+              'self.systemPrompt = UserDefaults.standard.string(forKey: "systemPrompt") ?? "' + default_prompt + '"',
+              'systemPrompt default')
+          # Hide the Turkish role headers from streamed text like the English ones.
+          text = replace_once(text,
+              '"<|im_start|>system", "<|im_start|>",',
+              '"<|im_start|>system", "<|im_start|>asistan", "<|im_start|>kullanici",\n'
+              '        "<|im_start|>sistem", "<|im_start|>",',
+              'special token filter')
+          state.write_text(text, encoding='utf-8')
+
+          # Mercan was trained on Turkish ChatML roles (libmercan format_chat). The
+          # model file has no tokenizer.chat_template, so llama.cpp would fall back
+          # to English system/user/assistant headers.
+          llama = Path('work/silo/Silo/Inference/LibLlama.swift')
+          s = llama.read_text(encoding='utf-8')
+          s = replace_once(s,
+              '        // SmolLM3 has a complex template',
+              '        // Mercan / NedoLM: Turkish ChatML roles\n'
+              '        if modelDesc.contains("nedolm") {\n'
+              '            return apply_mercan_template(messages: messages)\n'
+              '        }\n\n'
+              '        // SmolLM3 has a complex template',
+              'apply_chat_template dispatch')
+          s = replace_once(s,
+              '    private func apply_chatml_template(',
+              '    private func apply_mercan_template(messages: [(role: String, content: String)]) -> String {\n'
+              '        let roles = ["system": "sistem", "user": "kullanici", "assistant": "asistan"]\n'
+              '        var result = ""\n'
+              '        for msg in messages {\n'
+              '            let role = roles[msg.role] ?? msg.role\n'
+              '            let content = msg.content.replacingOccurrences(of: "<|", with: "<\\u{200B}|")\n'
+              '            result += "<|im_start|>\\(role)\\n\\(content)<|im_end|>\\n"\n'
+              '        }\n'
+              '        return result + "<|im_start|>asistan\\n"\n'
+              '    }\n\n'
+              '    private func apply_chatml_template(',
+              'apply_mercan_template')
+          # The CLI penalizes repeats within the current reply only; reset the
+          # sampler chain so penalty history does not leak across turns.
+          for fn in ('completion_init', 'completion_init_with_cache'):
+              s = replace_once(s,
+                  f'    func {fn}(text: String) throws {{\n        is_done = false\n',
+                  f'    func {fn}(text: String) throws {{\n        is_done = false\n        llama_sampler_reset(sampling)\n',
+                  fn)
+          llama.write_text(s, encoding='utf-8')
 
           plist_path = Path('work/silo/Silo/Info.plist')
           info = plistlib.loads(plist_path.read_bytes())
@@ -118,6 +178,7 @@ jobs:
           PY2
           grep -q 'MercanAI/Mercan-0.8B-SFT' work/silo/Silo/UI/LlamaState.swift
           grep -q 'Mercan-0.8B-SFT.gguf' work/silo/Silo/UI/LlamaState.swift
+          grep -q 'apply_mercan_template' work/silo/Silo/Inference/LibLlama.swift
 
       - name: Clone and patch llama.cpp
         shell: bash
@@ -177,6 +238,9 @@ jobs:
                   return nullptr;
               }
 
+              // Match the mercan CLI: greedy with repeat_penalty 1.05 over the last 64 tokens.
+              llama_sampler_chain_add(chain, llama_sampler_init_penalties(
+                      llama_vocab_n_tokens(vocab), 64, 1.05f, 0.0f, 0.0f));
               llama_sampler_chain_add(chain, llama_sampler_init_greedy());
               return chain;
           }
