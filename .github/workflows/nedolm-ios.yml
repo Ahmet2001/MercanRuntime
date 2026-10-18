@@ -100,4 +100,4 @@ jobs:
           api-key-id: ${{ vars.APPSTORE_API_KEY_ID }}
           api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
           wait-for-processing: 'true'
-          backend: altool
+          backend: AppStoreAPI
