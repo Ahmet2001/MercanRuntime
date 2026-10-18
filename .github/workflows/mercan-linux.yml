@@ -4,14 +4,27 @@ on:
   push:
     branches: [main]
     tags: ['v*']
-    # Docs-only changes skip the ~1h build; tag pushes ignore path filters.
-    paths-ignore: ['**.md', 'docs/**']
+    # Docs- and iOS-only changes skip this build; tag pushes ignore path filters.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/workflows/nedolm-ios.yml'
+      - 'scripts/build-nedolm-llama-ios.sh'
   pull_request:
-    paths-ignore: ['**.md', 'docs/**']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/workflows/nedolm-ios.yml'
+      - 'scripts/build-nedolm-llama-ios.sh'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+# A newer push to the same branch supersedes the running build.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-linux-cpu:
@@ -52,7 +65,10 @@ jobs:
             dist/mercan-linux-x86_64-cpu.tar.gz
             dist/mercan-linux-x86_64-cpu.tar.gz.sha256
 
+  # The CUDA package takes ~50 minutes, so it is built only for releases and
+  # manual runs. Pushes and pull requests still verify the code with the CPU build.
   build-linux-cuda:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     container:
       image: nvidia/cuda:12.4.1-devel-ubuntu22.04
