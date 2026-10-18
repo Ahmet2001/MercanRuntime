@@ -48,7 +48,7 @@ The `.mercan` file contains model weights, architecture metadata, tokenizer meta
 
 ## Runtime
 
-The reference runtime and CLI are published in `Ahmet2001/mercanApp-test1`. `libmercan` uses a stable C ABI over the native inference backend.
+The reference runtime and CLI are published in `Ahmet2001/MercanRuntime`. `libmercan` uses a stable C ABI over the native inference backend.
 
 ## Chat template
 

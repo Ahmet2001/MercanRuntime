@@ -1,6 +1,6 @@
 # NedoLM iOS build payload
 
-Bu paket `Ahmet2001/mercanApp-test1` reposuna eklenecek GitHub Actions dosyalarını içerir.
+Bu paket `Ahmet2001/MercanRuntime` reposuna eklenecek GitHub Actions dosyalarını içerir.
 
 ## Gereken iki runtime dosyası
 

@@ -125,3 +125,15 @@ install(FILES
     runtime/libmercan/include/mercan_plugin.h
     runtime/nedo004-ffi/include/nedo004.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Notices for the statically linked llama.cpp/ggml, NedoTokenizer and Rust crates.
+set(MERCAN_LICENSE_DIR "${CMAKE_INSTALL_DATAROOTDIR}/licenses/mercan")
+install(FILES
+    THIRD_PARTY_NOTICES.md
+    runtime/NedoTokenizer/APACHE-2.0.txt
+    runtime/NedoTokenizer/THIRD_PARTY_LICENSES/ZEMBEREK_NOTICE.md
+    DESTINATION ${MERCAN_LICENSE_DIR})
+install(FILES runtime/NedoTokenizer/LICENSE
+    DESTINATION ${MERCAN_LICENSE_DIR} RENAME NedoTokenizer-LICENSE)
+install(FILES "${MERCAN_LLAMA_DIR}/LICENSE"
+    DESTINATION ${MERCAN_LICENSE_DIR} RENAME llama.cpp-LICENSE)

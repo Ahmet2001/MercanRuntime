@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="${MERCAN_GITHUB_REPO:-Ahmet2001/mercanApp-test1}"
+REPO="${MERCAN_GITHUB_REPO:-Ahmet2001/MercanRuntime}"
 VERSION="${MERCAN_VERSION:-latest}"
 PREFIX="${MERCAN_PREFIX:-/usr/local}"
 FORCE_CPU="${MERCAN_FORCE_CPU:-0}"
@@ -86,6 +86,12 @@ if [ -f "$SRC/lib/libmercan.a" ]; then
 fi
 if [ -f "$SRC/include/mercan.h" ]; then
   $SUDO install -m 0644 "$SRC/include/mercan.h" "$PREFIX/include/mercan.h"
+fi
+if [ -d "$SRC/share/licenses/mercan" ]; then
+  $SUDO mkdir -p "$PREFIX/share/licenses/mercan"
+  for license in "$SRC/share/licenses/mercan"/*; do
+    $SUDO install -m 0644 "$license" "$PREFIX/share/licenses/mercan/"
+  done
 fi
 
 echo "Installed Mercan CLI ($VARIANT): $PREFIX/bin/mercan"

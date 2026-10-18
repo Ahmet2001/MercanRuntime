@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - name: Checkout mercanApp-test1
+      - name: Checkout MercanRuntime
         uses: actions/checkout@v4
 
       - name: Validate NedoLM runtime payload
