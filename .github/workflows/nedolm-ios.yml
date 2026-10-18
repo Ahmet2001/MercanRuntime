@@ -9,6 +9,7 @@ on:
   push:
     branches:
       - main
+      - ios
       - 'refactor/**'
       - 'feature/**'
     tags:
@@ -56,14 +57,14 @@ jobs:
           retention-days: 14
 
       - name: Import Apple distribution certificate
-        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' }}
+        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' && (github.ref != 'refs/heads/ios' || github.event_name == 'workflow_dispatch') }}
         uses: apple-actions/import-codesign-certs@v7
         with:
           p12-file-base64: ${{ secrets.APPSTORE_CERTIFICATES_FILE_BASE64 }}
           p12-password: ${{ secrets.APPSTORE_CERTIFICATES_PASSWORD }}
 
       - name: Download App Store provisioning profile
-        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' }}
+        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' && (github.ref != 'refs/heads/ios' || github.event_name == 'workflow_dispatch') }}
         uses: apple-actions/download-provisioning-profiles@v6
         with:
           bundle-id: ${{ vars.IOS_BUNDLE_ID }}
@@ -73,7 +74,7 @@ jobs:
           api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
 
       - name: Archive signed App Store build
-        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' }}
+        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' && (github.ref != 'refs/heads/ios' || github.event_name == 'workflow_dispatch') }}
         env:
           IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
@@ -82,7 +83,7 @@ jobs:
         run: ios-app/scripts/archive-appstore.sh
 
       - name: Upload signed IPA artifact
-        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' }}
+        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' && (github.ref != 'refs/heads/ios' || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@v4
         with:
           name: Mercan-iOS-AppStore-IPA
@@ -91,7 +92,7 @@ jobs:
           retention-days: 14
 
       - name: Upload to TestFlight
-        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' }}
+        if: ${{ vars.ENABLE_TESTFLIGHT == 'true' && (github.ref != 'refs/heads/ios' || github.event_name == 'workflow_dispatch') }}
         uses: apple-actions/upload-testflight-build@v5
         with:
           app-path: build/ios/Mercan-AppStore.ipa

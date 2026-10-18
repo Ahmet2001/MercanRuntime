@@ -1,0 +1,112 @@
+name: Publish Mercan Identity E2 Q4
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_url:
+        description: Direct URL to the verified E2 Q4 .mercan artifact
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      TAG: mercan-0.8b-identity-e2-q4-20260924
+      ASSET: Mercan-0.8B-Identity-E2-Q4_K_M.mercan
+      MODEL_URL: ${{ inputs.model_url }}
+
+    steps:
+      - name: Download Q4 Mercan artifact
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 --retry-delay 3 \
+            -o "$ASSET" "$MODEL_URL"
+          ls -lh "$ASSET"
+
+      - name: Verify format and checkpoint provenance
+        run: |
+          set -euo pipefail
+          test "$(head -c 4 "$ASSET")" = "GGUF"
+          python3 - "$ASSET" <<'PY'
+          import json, struct, sys
+          p=sys.argv[1]
+          with open(p,"rb") as f:
+              def u32(): return struct.unpack("<I",f.read(4))[0]
+              def u64(): return struct.unpack("<Q",f.read(8))[0]
+              def s():
+                  n=u64()
+                  return f.read(n).decode("utf-8","replace")
+              def scalar(t):
+                  fmts={0:"<B",1:"<b",2:"<H",3:"<h",4:"<I",5:"<i",6:"<f",7:"<?",10:"<Q",11:"<q",12:"<d"}
+                  if t==8: return s()
+                  if t not in fmts: raise RuntimeError(f"unsupported GGUF type {t}")
+                  return struct.unpack(fmts[t],f.read(struct.calcsize(fmts[t])))[0]
+              def val(t):
+                  if t!=9: return scalar(t)
+                  et=u32(); n=u64()
+                  return [scalar(et) for _ in range(n)]
+              if f.read(4)!=b"GGUF": raise SystemExit("not GGUF")
+              version=u32(); nt=u64(); nk=u64()
+              meta={}
+              for _ in range(nk):
+                  k=s(); t=u32(); meta[k]=val(t)
+          keys=[
+              "general.name","general.file_type","mercan.source_checkpoint",
+              "nedolm.source_checkpoint","nedolm.vocab_size","nedolm.context_length",
+              "mercan.chat.message_start_token_id","mercan.chat.message_end_token_id",
+              "mercan.chat.stop_token_ids","mercan.chat.role_user","mercan.chat.role_assistant"
+          ]
+          print("GGUF_VERSION",version,"TENSORS",nt,"KV",nk)
+          for k in keys:
+              if k in meta: print(k,"=",meta[k])
+          source=str(meta.get("mercan.source_checkpoint") or meta.get("nedolm.source_checkpoint") or "")
+          result={
+              "source_checkpoint": source,
+              "vocab_size": meta.get("nedolm.vocab_size"),
+              "context_length": meta.get("nedolm.context_length"),
+              "name": meta.get("general.name"),
+          }
+          open("MODEL_METADATA.json","w").write(json.dumps(result,indent=2)+"\n")
+          if "epoch_02_step_00046.pt" not in source:
+              raise SystemExit(f"NOT_E2 source_checkpoint={source!r}")
+          PY
+          test "$(stat -c %s "$ASSET")" -gt 100000000
+          sha256sum "$ASSET" > "$ASSET.sha256"
+          cat MODEL_METADATA.json
+          cat "$ASSET.sha256"
+
+      - name: Write provenance
+        run: |
+          cat > PROVENANCE.txt <<EOF
+          Model: Mercan 0.8B Identity E2
+          Source checkpoint: epoch_02_step_00046.pt
+          Quantization: Q4_K_M
+          Container: Mercan v1 / GGUF v3
+          Source artifact URL: ${{ inputs.model_url }}
+          Runtime branch: ${{ github.ref_name }}
+          Stop protocol: 32001=<|im_end|>, 2=<EOS>, 32000=<|im_start|>
+          Chat roles: sistem, kullanici, asistan
+          EOF
+
+      - name: Publish GitHub Release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "$ASSET" "$ASSET.sha256" PROVENANCE.txt \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" \
+              "$ASSET" "$ASSET.sha256" PROVENANCE.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Mercan 0.8B Identity E2 Q4_K_M" \
+              --notes "Q4_K_M Mercan deployment artifact from epoch_02_step_00046.pt. Includes runtime fixes for token-level chat stopping and Turkish SFT role serialization."
+          fi

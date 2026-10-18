@@ -129,7 +129,16 @@ def parse_vocab_txt(path: Path, vocab_size: int) -> Tuple[List[bytes], List[int]
         token_kind = cols[1]
         hex_bytes = cols[3].strip()
         if token_kind == "special":
-            piece = {0: b"<PAD>", 1: b"<BOS>", 2: b"<EOS>"}[token_id]
+            special_pieces = {
+                0: b"<PAD>",
+                1: b"<BOS>",
+                2: b"<EOS>",
+                32000: b"<|im_start|>",
+                32001: b"<|im_end|>",
+            }
+            if token_id not in special_pieces:
+                raise RuntimeError(f"unsupported special token id in vocab: {token_id}")
+            piece = special_pieces[token_id]
             token_type = 3  # GGML CONTROL
         else:
             piece = bytes.fromhex(hex_bytes)
@@ -286,7 +295,7 @@ def build_metadata(
 ) -> List[Tuple[str, int, object]]:
     checkpoint_name = Path(str(provenance.get("source_path", "unknown"))).name
     base_checkpoint = str(provenance.get("base_checkpoint", "unknown"))
-    return [
+    metadata = [
         ("general.architecture", GGUF_TYPE_STRING, "nedolm"),
         ("general.name", GGUF_TYPE_STRING, model_name),
         ("general.description", GGUF_TYPE_STRING, "Mercan Turkish assistant model with token-prior MorphFFN"),
@@ -300,7 +309,7 @@ def build_metadata(
         ("mercan.source_checkpoint", GGUF_TYPE_STRING, checkpoint_name),
         ("mercan.base_checkpoint", GGUF_TYPE_STRING, base_checkpoint),
         ("mercan.chat_template", GGUF_TYPE_STRING, "chatml_tr"),
-        ("mercan.chat_template_spec", GGUF_TYPE_STRING, "<|im_start|>{rol}\\n{content}<|im_end|>\\n; EOS once at conversation end"),
+        ("mercan.chat_template_spec", GGUF_TYPE_STRING, "<|im_start|>{rol}\\n{content}<|im_end|>\\n; roles=sistem,kullanici,asistan; EOS once at conversation end"),
         ("mercan.tokenizer.type", GGUF_TYPE_STRING, "ndsurf004"),
         ("mercan.tokenizer.spec", GGUF_TYPE_STRING, "NDSRF004"),
         ("mercan.tokenizer.surface_vocab_sha256", GGUF_TYPE_STRING, vocab_sha),
@@ -332,6 +341,16 @@ def build_metadata(
         ("tokenizer.ggml.add_bos_token", GGUF_TYPE_BOOL, False),
         ("tokenizer.ggml.add_eos_token", GGUF_TYPE_BOOL, False),
     ]
+    if int(arch["vocab_size"]) >= 32002:
+        metadata.extend([
+            ("mercan.chat.message_start_token_id", GGUF_TYPE_UINT32, 32000),
+            ("mercan.chat.message_end_token_id", GGUF_TYPE_UINT32, 32001),
+            ("mercan.chat.stop_token_ids", GGUF_TYPE_ARRAY, (GGUF_TYPE_INT32, [32001, 2, 32000])),
+            ("mercan.chat.role_system", GGUF_TYPE_STRING, "sistem"),
+            ("mercan.chat.role_user", GGUF_TYPE_STRING, "kullanici"),
+            ("mercan.chat.role_assistant", GGUF_TYPE_STRING, "asistan"),
+        ])
+    return metadata
 
 
 def validate_arch(arch: Dict[str, object]) -> None:
