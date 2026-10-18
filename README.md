@@ -121,7 +121,8 @@ mercan run model.mercan --web-search -p "Bugün hava durumu nasıl?"
 | `--repeat-penalty F` | `1.15` | Penalty for recently used tokens; `1.0` disables it. |
 | `--repeat-last-n N` | `64` | Window the penalty looks at; `0` disables it. |
 | `-t, --threads N` | auto | CPU threads. |
-| `--gpu-layers N` | `-1` on CUDA | Layers to offload; `-1` offloads all. |
+| `--device auto\|cpu\|cuda` | `auto` | Use usable CUDA or CPU; explicit CUDA must succeed. |
+| `--gpu-layers N` | `-1` with usable CUDA, else `0` | Layers to offload; `-1` offloads all, `0` forces CPU with auto. |
 | `--plugin PATH` | — | Load an external architecture/tokenizer plugin. |
 | `--web-search` | off | Search the web before every prompt (see below). |
 | `--web-search-url URL` | `http://localhost:8080` | SearXNG base URL. |
@@ -175,9 +176,15 @@ sizes before calling functions that pass or return structs by value. ABI 1
 parameter layouts are frozen; incompatible additions require new entry points.
 Keep model/context handles alive for their dependents, and free all models
 and contexts before freeing the process-wide backend. Concurrent use of one
-context must be serialized by its owner. The CLI and EthosoftLib 0.6.0 use the
+context must be serialized by its owner. The CLI and EthosoftLib use the
 same native generation/chat engine, including sampling, stop handling and
 cooperative cancellation. See [Generation API v1](docs/GENERATION_API_V1.md).
+
+MercanRuntime 0.3.0 and EthosoftLib 0.7.0 add verified CPU/CUDA selection,
+compiled-backend and usable-device discovery, and actual model weight
+placement queries. `mercan devices` prints a capability snapshot; explicit
+GPU requests fail instead of silently using CPU. See
+[Device API v1](docs/DEVICE_API_V1.md).
 
 
 | Surface | Header | What it provides | Docs |

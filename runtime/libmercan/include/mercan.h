@@ -60,6 +60,20 @@ MERCAN_API void mercan_model_free(mercan_model * model);
 MERCAN_API const char * mercan_model_architecture(const mercan_model * model);
 MERCAN_API const char * mercan_model_tokenizer(const mercan_model * model);
 
+// Device API v1. Call after backend_init(). JSON strings are UTF-8 snapshots;
+// the runtime snapshot is thread-local and valid until its next snapshot call.
+// Model placement strings are borrowed until model_free(). ABI 1 structs stay frozen.
+#define MERCAN_DEVICE_API_VERSION 1
+MERCAN_API uint32_t mercan_device_api_version(void);
+MERCAN_API bool mercan_cuda_available_v1(void);
+MERCAN_API const char * mercan_runtime_devices_json_v1(void);
+// cpu requires zero layers, cuda nonzero. auto + zero chooses automatically;
+// auto + nonzero is strict CUDA offload. See docs/DEVICE_API_V1.md.
+MERCAN_API mercan_model * mercan_model_load_device_v1(
+    const char * path, mercan_model_params params, const char * device);
+MERCAN_API const char * mercan_model_device_v1(const mercan_model * model);
+MERCAN_API const char * mercan_model_device_json_v1(const mercan_model * model);
+
 MERCAN_API mercan_context * mercan_context_create(mercan_model * model, mercan_context_params params);
 MERCAN_API void mercan_context_free(mercan_context * ctx);
 

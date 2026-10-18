@@ -4,6 +4,8 @@
 #include "mercan_internal.hpp"
 #include "generic_backend.hpp"
 #include "llama.h"
+#include "llama-model.h"
+#include "device_info.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -22,6 +24,9 @@ struct mercan_model {
     void * tokenizer_state = nullptr;
     std::string architecture_name;
     std::string tokenizer_name;
+    std::vector<ggml_backend_dev_t> selected_devices;
+    std::string device = "cpu";
+    std::string placement;
 };
 
 struct mercan_context {
@@ -50,7 +55,7 @@ static void mercan_llama_log(enum ggml_log_level level, const char * text, void 
 extern "C" {
 
 const char * mercan_version(void) {
-    return "0.2.0";
+    return "0.3.0";
 }
 
 uint32_t mercan_abi_version(void) {
@@ -67,6 +72,44 @@ size_t mercan_context_params_size(void) {
 
 const char * mercan_last_error(void) {
     return g_last_error.c_str();
+}
+
+uint32_t mercan_device_api_version(void) { return MERCAN_DEVICE_API_VERSION; }
+bool mercan_cuda_available_v1(void) {
+    try { return !mercan_devices::cuda().empty(); }
+    catch (...) { return false; }
+}
+const char * mercan_runtime_devices_json_v1(void) {
+    static thread_local std::string snapshot;
+    try {
+#ifdef MERCAN_CUDA_BUILD
+        const char * compiled = "true";
+#else
+        const char * compiled = "false";
+#endif
+        snapshot = std::string("{\"api_version\":1,\"cuda_compiled\":") + compiled +
+            ",\"cuda_available\":" + (mercan_cuda_available_v1() ? "true" : "false") + ",\"backends\":[";
+        for (size_t i = 0; i < ggml_backend_reg_count(); ++i) {
+            if (i) snapshot += ',';
+            snapshot += mercan_devices::quote(ggml_backend_reg_name(ggml_backend_reg_get(i)));
+        }
+        snapshot += "],\"devices\":[";
+        for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+            auto dev = ggml_backend_dev_get(i);
+            size_t available = 0, total = 0;
+            ggml_backend_dev_memory(dev, &available, &total);
+            if (i) snapshot += ',';
+            snapshot += "{\"name\":" + mercan_devices::quote(ggml_backend_dev_name(dev)) +
+                ",\"description\":" + mercan_devices::quote(ggml_backend_dev_description(dev)) +
+                ",\"backend\":" + mercan_devices::quote(mercan_devices::backend(dev)) +
+                ",\"type\":" + mercan_devices::quote(mercan_devices::kind(dev)) +
+                ",\"memory_free\":" + std::to_string(available) + ",\"memory_total\":" + std::to_string(total) + "}";
+        }
+        snapshot += "]}";
+        return snapshot.c_str();
+    } catch (const std::exception & e) { set_error(e.what()); }
+    catch (...) { set_error("device discovery failed"); }
+    return nullptr;
 }
 
 void mercan_backend_init(void) {
@@ -98,7 +141,7 @@ mercan_context_params mercan_context_default_params(void) {
     return p;
 }
 
-mercan_model * mercan_model_load(const char * path, mercan_model_params params) {
+static mercan_model * load_model(const char * path, mercan_model_params params, const char * device) {
     g_last_error.clear();
     if (!path || !*path) {
         set_error("model path is empty");
@@ -106,6 +149,40 @@ mercan_model * mercan_model_load(const char * path, mercan_model_params params) 
     }
     try {
         mercan_ensure_builtin_plugins();
+        const std::string requested = device ? device : "legacy";
+        if (device && requested != "cpu" && requested != "cuda" && requested != "auto") {
+            set_error("device must be cpu, cuda, or auto"); return nullptr;
+        }
+        if (params.n_gpu_layers < -1) { set_error("gpu_layers must be >= -1"); return nullptr; }
+        auto selected = mercan_devices::cuda();
+        if (requested == "auto") {
+            if (selected.empty() && params.n_gpu_layers != 0) {
+                set_error("GPU offload explicitly requested but no usable CUDA device is available"); return nullptr;
+            }
+            if (selected.empty()) params.n_gpu_layers = 0;
+            else if (!params.n_gpu_layers) params.n_gpu_layers = -1;
+        } else if (requested == "cuda") {
+            if (!params.n_gpu_layers) { set_error("device=cuda conflicts with gpu_layers=0"); return nullptr; }
+#ifndef MERCAN_CUDA_BUILD
+            set_error("CUDA requested but this libmercan was built without CUDA. Install a CUDA build or use device=cpu/auto.");
+            return nullptr;
+#else
+            if (selected.empty()) { set_error("CUDA requested but no usable CUDA device was found. Check the NVIDIA driver and device visibility."); return nullptr; }
+#endif
+        } else if (requested == "cpu" && params.n_gpu_layers != 0) {
+            set_error("device=cpu conflicts with GPU offload"); return nullptr;
+        }
+        if (!params.n_gpu_layers) selected.clear();
+        else if (requested == "legacy") {
+            selected.clear();
+            auto dev = mercan_devices::first_gpu();
+            if (!dev) { set_error("GPU offload requested but this runtime has no usable GPU device"); return nullptr; }
+            selected.push_back(dev);
+        }
+        if (params.n_gpu_layers != 0 && selected.empty()) {
+            set_error("GPU offload requested but no compatible device is available"); return nullptr;
+        }
+        selected.push_back(nullptr); // null-terminated list retained by the model
 
         mercan_metadata_probe metadata;
         std::string metadata_error;
@@ -188,11 +265,13 @@ mercan_model * mercan_model_load(const char * path, mercan_model_params params) 
         mercan_generic_model * gm = nullptr;
         if (generic_external) {
             std::string generic_error;
-            gm = mercan_generic_model_load(path, arch, params, generic_error);
+            gm = mercan_generic_model_load(path, arch, params, generic_error, selected[0]);
             if (!gm) { set_error(generic_error); return nullptr; }
         } else {
             llama_model_params lp = llama_model_default_params();
             lp.n_gpu_layers = params.n_gpu_layers;
+            lp.devices = device ? selected.data() : nullptr;
+            lp.split_mode = LLAMA_SPLIT_MODE_LAYER;
             lp.load_mode = params.use_mmap ? LLAMA_LOAD_MODE_MMAP : LLAMA_LOAD_MODE_NONE;
             lp.check_tensors = params.check_tensors;
             lm = llama_model_load_from_file(path, lp);
@@ -201,6 +280,44 @@ mercan_model * mercan_model_load(const char * path, mercan_model_params params) 
                 return nullptr;
             }
         }
+
+        // Inspect actual weight-buffer ownership instead of reporting requested
+        // settings as if they were effective device placement.
+        std::vector<ggml_backend_dev_t> actual;
+        bool host_weights = false, gpu_weights = false, only_cuda = true;
+        auto remember = [&](ggml_backend_dev_t dev) {
+            if (!dev) return;
+            if (std::find(actual.begin(), actual.end(), dev) == actual.end()) actual.push_back(dev);
+            if (mercan_devices::gpu(dev)) {
+                gpu_weights = true;
+                only_cuda = only_cuda && std::strcmp(mercan_devices::backend(dev), "CUDA") == 0;
+            } else host_weights = true;
+        };
+        if (gm) remember(mercan_generic_model_device(gm));
+        else for (const auto & entry : lm->tensors_by_name) {
+            auto * tensor = entry.second;
+            while (tensor && !tensor->buffer && tensor->view_src) tensor = tensor->view_src;
+            if (!tensor || !tensor->buffer) continue;
+            auto dev = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(tensor->buffer));
+            if (ggml_backend_buffer_is_host(tensor->buffer)) dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+            remember(dev);
+        }
+        if (params.n_gpu_layers != 0 && (!gpu_weights || (requested == "cuda" && !only_cuda))) {
+            if (lm) llama_model_free(lm);
+            if (gm) mercan_generic_model_free(gm);
+            set_error("GPU requested but model weights were not placed on the requested GPU backend"); return nullptr;
+        }
+        if (actual.empty()) remember(ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU));
+        const std::string effective = gpu_weights ? (only_cuda ? "cuda" : "gpu") : "cpu";
+        std::string placement = "{\"device\":" + mercan_devices::quote(effective) +
+            ",\"placement\":" + mercan_devices::quote(gpu_weights ? (host_weights ? "mixed" : "gpu") : "cpu") +
+            ",\"gpu_layers_requested\":" + std::to_string(params.n_gpu_layers) + ",\"devices\":[";
+        for (size_t i = 0; i < actual.size(); ++i) {
+            if (i) placement += ',';
+            placement += "{\"name\":" + mercan_devices::quote(ggml_backend_dev_name(actual[i])) +
+                ",\"backend\":" + mercan_devices::quote(mercan_devices::backend(actual[i])) + "}";
+        }
+        placement += "]}";
 
         void * tokenizer_state = nullptr;
         if (tokenizer && tokenizer->create) {
@@ -222,6 +339,9 @@ mercan_model * mercan_model_load(const char * path, mercan_model_params params) 
         out->tokenizer_state = tokenizer_state;
         out->architecture_name = arch_name;
         out->tokenizer_name = tokenizer_name;
+        out->selected_devices = std::move(selected);
+        out->device = effective;
+        out->placement = std::move(placement);
         return out;
     } catch (const std::exception & e) {
         set_error(e.what());
@@ -230,6 +350,20 @@ mercan_model * mercan_model_load(const char * path, mercan_model_params params) 
         set_error("unknown error while loading model");
         return nullptr;
     }
+}
+
+mercan_model * mercan_model_load(const char * path, mercan_model_params params) {
+    return load_model(path, params, nullptr);
+}
+mercan_model * mercan_model_load_device_v1(const char * path, mercan_model_params params, const char * device) {
+    if (!device) { set_error("device is required"); return nullptr; }
+    return load_model(path, params, device);
+}
+const char * mercan_model_device_v1(const mercan_model * model) {
+    return model ? model->device.c_str() : "unknown";
+}
+const char * mercan_model_device_json_v1(const mercan_model * model) {
+    return model ? model->placement.c_str() : nullptr;
 }
 
 void mercan_model_free(mercan_model * model) {

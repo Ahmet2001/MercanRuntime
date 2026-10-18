@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(mercan VERSION 0.2.0 LANGUAGES C CXX)
+project(mercan VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -50,17 +50,22 @@ target_include_directories(libmercan
     PRIVATE
         "${CMAKE_SOURCE_DIR}/core"
         "${MERCAN_LLAMA_DIR}/include"
+        "${MERCAN_LLAMA_DIR}/src"
         "${MERCAN_LLAMA_DIR}/ggml/include")
 target_link_libraries(libmercan PUBLIC llama ${CMAKE_DL_LIBS})
 
 add_executable(mercan cli/main.cpp)
 target_link_libraries(mercan PRIVATE libmercan)
 if(GGML_CUDA)
+    target_compile_definitions(libmercan PRIVATE MERCAN_CUDA_BUILD=1)
     target_compile_definitions(mercan PRIVATE MERCAN_CUDA_BUILD=1)
 endif()
 
 if(MERCAN_BUILD_SDK_TESTS)
     enable_testing()
+    add_executable(mercan-device-api-test tests/device_api_test.cpp)
+    target_link_libraries(mercan-device-api-test PRIVATE libmercan)
+    add_test(NAME mercan-device-api COMMAND mercan-device-api-test)
     add_executable(mercan-generation-api-test tests/generation_api_test.cpp)
     target_link_libraries(mercan-generation-api-test PRIVATE libmercan)
     add_test(NAME mercan-generation-api COMMAND mercan-generation-api-test)
@@ -101,6 +106,7 @@ if(MERCAN_BUILD_SDK_TESTS)
     add_test(NAME mercan-generic-plugin-backend-v1 COMMAND mercan-generic-plugin-backend-test $<TARGET_FILE:mercan_arch_anka> ${CMAKE_CURRENT_BINARY_DIR}/anka-tiny.mercan)
     if(GGML_CUDA)
         add_test(NAME mercan-generic-plugin-backend-gpu-v1 COMMAND mercan-generic-plugin-backend-test $<TARGET_FILE:mercan_arch_anka> ${CMAKE_CURRENT_BINARY_DIR}/anka-tiny-gpu.mercan gpu)
+        set_tests_properties(mercan-generic-plugin-backend-gpu-v1 PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 endif()
 

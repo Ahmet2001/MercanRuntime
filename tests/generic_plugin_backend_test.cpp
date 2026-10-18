@@ -102,7 +102,17 @@ int main(int argc, char ** argv) {
 
     auto mp = mercan_model_default_params();
     mp.n_gpu_layers = (argc == 4 && std::strcmp(argv[3], "gpu") == 0) ? -1 : 0;
+    if (mp.n_gpu_layers && !mercan_cuda_available_v1()) {
+        std::cout << "No usable CUDA device; skipping GPU execution test\n";
+        mercan_backend_free();
+        return 77;
+    }
     mercan_model * m = mercan_model_load(argv[2], mp);
+    if (m) {
+        const char * actual = mercan_model_device_v1(m);
+        const bool on_cpu = std::strcmp(actual, "cpu") == 0;
+        if (on_cpu != (mp.n_gpu_layers == 0) || !mercan_model_device_json_v1(m)) return 51;
+    }
     if (!m) { std::cerr << mercan_last_error() << "\n"; return fail("model load"); }
     if (std::strcmp(mercan_model_architecture(m), "anka") != 0) return fail("architecture");
     if (std::strcmp(mercan_model_tokenizer(m), "anka-byte") != 0) return fail("tokenizer");

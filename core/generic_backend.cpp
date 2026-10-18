@@ -421,8 +421,13 @@ struct mercan_generic_context {
     uint32_t n_past = 0;
 };
 
+ggml_backend_dev_t mercan_generic_model_device(const mercan_generic_model * model) {
+    return model && model->backend ? ggml_backend_get_device(model->backend) : nullptr;
+}
+
 mercan_generic_model * mercan_generic_model_load(const char * path, const mercan_architecture_v1 * architecture,
-                                                  mercan_model_params params, std::string & error) {
+                                                  mercan_model_params params, std::string & error,
+                                                  ggml_backend_dev_t preferred) {
     auto m = std::make_unique<mercan_generic_model>();
     m->architecture = architecture;
     gguf_init_params ip{}; ip.no_alloc = true; ip.ctx = &m->weights_ctx;
@@ -430,8 +435,10 @@ mercan_generic_model * mercan_generic_model_load(const char * path, const mercan
     if (!m->gguf || !m->weights_ctx) { error = "generic backend failed to read GGUF tensors"; return nullptr; }
 
     ggml_backend_dev_t dev = nullptr;
-    if (params.n_gpu_layers != 0) dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
-    if (!dev) dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (params.n_gpu_layers != 0) {
+        dev = preferred ? preferred : ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
+        if (!dev) { error = "GPU offload requested but no compatible GPU device is available"; return nullptr; }
+    } else dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
     if (!dev) { error = "generic backend found no ggml backend device"; return nullptr; }
     m->backend = ggml_backend_dev_init(dev, nullptr);
     if (!m->backend) { error = "generic backend device initialization failed"; return nullptr; }

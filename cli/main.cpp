@@ -20,7 +20,7 @@
 
 namespace fs = std::filesystem;
 
-static constexpr const char * VERSION = "0.2.0";
+static constexpr const char * VERSION = "0.3.0";
 
 static void die(const std::string & message) {
     std::cerr << "mercan: " << message << "\n";
@@ -434,11 +434,9 @@ struct run_options {
     std::string web_search_url = "http://localhost:8080";
     int threads = 0;
     std::vector<std::string> plugins;
-#ifdef MERCAN_CUDA_BUILD
-    int gpu_layers = -1;
-#else
     int gpu_layers = 0;
-#endif
+    bool gpu_layers_set = false;
+    std::string device = "auto";
 };
 
 using chat_messages = std::vector<std::pair<std::string, std::string>>;
@@ -515,7 +513,9 @@ static void print_help() {
         << "  --web-chars N           max characters read from each fetched page (default 1500)\n"
         << "  -t, --threads N         CPU threads\n"
         << "  --plugin PATH           load external architecture/tokenizer plugin\n"
-        << "  --gpu-layers N          GPU layers (-1 = all; CUDA build defaults to -1)\n\n"
+        << "  --device auto|cpu|cuda  auto selects usable CUDA, otherwise CPU\n"
+        << "  --gpu-layers N          GPU layers (-1 = all; 0 = CPU); explicit GPU requests must succeed\n"
+        << "  mercan devices          show compiled backends and usable devices as JSON\n\n"
         << "Examples:\n"
         << "  mercan run model.mercan\n"
         << "  mercan run MercanAI/Mercan-0.8B-SFT\n"
@@ -579,29 +579,33 @@ static int command_run(int argc, char ** argv) {
         else if (a == "--web-chars") opt.web_chars_per_page = static_cast<size_t>(std::stoul(need(a.c_str())));
         else if (a == "-t" || a == "--threads") opt.threads = std::stoi(need(a.c_str()));
         else if (a == "--plugin") opt.plugins.push_back(need(a.c_str()));
-        else if (a == "--gpu-layers") opt.gpu_layers = std::stoi(need(a.c_str()));
+        else if (a == "--device") opt.device = need(a.c_str());
+        else if (a == "--gpu-layers") { opt.gpu_layers = std::stoi(need(a.c_str())); opt.gpu_layers_set = true; }
         else if (a == "-h" || a == "--help") { print_help(); return 0; }
         else die("unknown option: " + a);
     }
 
     for (const auto & plugin : opt.plugins) load_plugin_or_die(plugin);
-    fs::path model_path = resolve_model(opt.model);
     mercan_backend_init();
     mercan_model_params mp = mercan_model_default_params();
+    if (opt.device != "auto" && opt.device != "cpu" && opt.device != "cuda") die("device must be auto, cpu, or cuda");
+    if (opt.gpu_layers < -1) die("gpu-layers must be >= -1");
+    if (opt.device == "cpu" && opt.gpu_layers_set && opt.gpu_layers != 0) die("device=cpu conflicts with GPU layers");
+    if (opt.device == "cuda" && opt.gpu_layers_set && opt.gpu_layers == 0) die("device=cuda conflicts with gpu-layers=0");
+    if (opt.device == "auto") {
+        if (opt.gpu_layers_set) opt.device = opt.gpu_layers == 0 ? "cpu" : "cuda";
+        else opt.device = mercan_cuda_available_v1() ? "cuda" : "cpu";
+    }
+    if (!opt.gpu_layers_set) opt.gpu_layers = opt.device == "cuda" ? -1 : 0;
+    // Validate explicit CUDA before resolving/downloading a remote model.
+    if (opt.device == "cuda" && !mercan_cuda_available_v1())
+        die("CUDA requested but unavailable in this runtime. Check 'mercan devices', the CUDA build and NVIDIA driver.");
     mp.n_gpu_layers = opt.gpu_layers;
-#ifdef MERCAN_CUDA_BUILD
-    std::cout << "Backend: CUDA";
-    if (opt.gpu_layers < 0) std::cout << " (all layers)";
-    else std::cout << " (" << opt.gpu_layers << " GPU layers)";
-    std::cout << "\n";
-#else
-    std::cout << "Backend: CPU";
-    if (opt.gpu_layers != 0) std::cout << " (CUDA backend not included in this build)";
-    std::cout << "\n";
-#endif
+    fs::path model_path = resolve_model(opt.model);
     std::cout << "Loading " << model_path << "...\n";
-    mercan_model * model = mercan_model_load(model_path.string().c_str(), mp);
+    mercan_model * model = mercan_model_load_device_v1(model_path.string().c_str(), mp, opt.device.c_str());
     if (!model) die(std::string("model load failed: ") + mercan_last_error());
+    std::cout << "Backend: " << mercan_model_device_v1(model) << "\n";
 
     chat_messages transcript;
     if (!opt.system.empty()) transcript.emplace_back("system", opt.system);
@@ -759,6 +763,14 @@ int main(int argc, char ** argv) {
     if (cmd == "tensor") return command_tensor(argc, argv);
     if (cmd == "kv") return command_kv(argc, argv);
     if (cmd == "plugin") return command_plugin(argc, argv);
+    if (cmd == "devices") {
+        mercan_backend_init();
+        const char * snapshot = mercan_runtime_devices_json_v1();
+        if (!snapshot) die(mercan_last_error());
+        std::cout << snapshot << "\n";
+        mercan_backend_free();
+        return 0;
+    }
     if (cmd == "pull") {
         if (argc < 3) die("missing Hugging Face repository");
         const auto p = pull_hf(parse_hf_spec(argv[2]), argc > 3 && std::string(argv[3]) == "--force");

@@ -2,6 +2,7 @@
 
 #include "mercan.h"
 #include "mercan_arch.h"
+#include "ggml-backend.h"
 
 #include <string>
 
@@ -11,7 +12,9 @@ struct mercan_generic_context;
 mercan_generic_model * mercan_generic_model_load(const char * path,
                                                   const mercan_architecture_v1 * architecture,
                                                   mercan_model_params params,
-                                                  std::string & error);
+                                                  std::string & error,
+                                                  ggml_backend_dev_t preferred = nullptr);
+ggml_backend_dev_t mercan_generic_model_device(const mercan_generic_model * model);
 void mercan_generic_model_free(mercan_generic_model * model);
 
 mercan_generic_context * mercan_generic_context_create(mercan_generic_model * model,
