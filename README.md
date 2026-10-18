@@ -162,6 +162,23 @@ The full contract is in [`spec/MERCAN_FORMAT_V1.md`](spec/MERCAN_FORMAT_V1.md).
 
 ## SDK and plugins
 
+### Embedding the inference runtime
+
+Applications can load `libmercan` in-process through the public C API in
+`runtime/libmercan/include/mercan.h`. Build with `MERCAN_BUILD_SHARED=ON`
+to produce a shared library; the regular Linux CLI package remains static.
+The Python integration lives in `ethosoftlib.mercan` in EthosoftLib.
+
+New shared builds expose `mercan_abi_version()`, `mercan_model_params_size()`
+and `mercan_context_params_size()`. Bindings should verify ABI 1 and parameter
+sizes before calling functions that pass or return structs by value. ABI 1
+parameter layouts are frozen; incompatible additions require new entry points.
+Keep model/context handles alive for their dependents, and free all models
+and contexts before freeing the process-wide backend. Concurrent use of one
+context must be serialized by its owner. The C API currently exposes low-level
+decode/logits operations; CLI and language SDKs implement generation on top.
+
+
 | Surface | Header | What it provides | Docs |
 |---|---|---|---|
 | Architecture / Tokenizer SDK v1 | `mercan_arch.h`, `mercan_tokenizer.h` | Versioned, append-only descriptors for new model families | [ARCHITECTURE_SDK.md](docs/ARCHITECTURE_SDK.md) |

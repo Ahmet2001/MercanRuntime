@@ -50,6 +50,18 @@ const char * mercan_version(void) {
     return "0.1.2";
 }
 
+uint32_t mercan_abi_version(void) {
+    return MERCAN_ABI_VERSION;
+}
+
+size_t mercan_model_params_size(void) {
+    return sizeof(mercan_model_params);
+}
+
+size_t mercan_context_params_size(void) {
+    return sizeof(mercan_context_params);
+}
+
 const char * mercan_last_error(void) {
     return g_last_error.c_str();
 }

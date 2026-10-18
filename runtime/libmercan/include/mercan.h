@@ -23,6 +23,10 @@ extern "C" {
 
 typedef int32_t mercan_token;
 
+// ABI 1 parameter layouts are frozen. Add new versioned entry points instead
+// of extending structs passed by value. Bindings can check these before use.
+#define MERCAN_ABI_VERSION 1
+
 typedef struct mercan_model mercan_model;
 typedef struct mercan_context mercan_context;
 
@@ -40,6 +44,9 @@ typedef struct mercan_context_params {
 } mercan_context_params;
 
 MERCAN_API const char * mercan_version(void);
+MERCAN_API uint32_t mercan_abi_version(void);
+MERCAN_API size_t mercan_model_params_size(void);
+MERCAN_API size_t mercan_context_params_size(void);
 MERCAN_API const char * mercan_last_error(void);
 
 MERCAN_API void mercan_backend_init(void);
