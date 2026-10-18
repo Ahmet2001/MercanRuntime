@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -34,6 +35,15 @@ struct mercan_context {
     mercan_generic_context * generic = nullptr;
     mercan_model * model = nullptr;
     uint32_t tokens = 0;
+};
+
+struct mercan_embedder {
+    mercan_model * model = nullptr;
+    llama_context * impl = nullptr;
+    int32_t size = 0;
+    uint32_t n_ctx = 0;
+    std::mutex mutex;
+    ~mercan_embedder() { if (impl) llama_free(impl); }
 };
 
 static thread_local std::string g_last_error;
@@ -558,6 +568,93 @@ int32_t mercan_token_to_piece(
     const llama_vocab * vocab = llama_model_get_vocab(model->impl);
     if (!vocab) return 0;
     return llama_token_to_piece(vocab, token, out, capacity, 0, special);
+}
+
+uint32_t mercan_embedding_api_version(void) { return MERCAN_EMBEDDING_API_VERSION; }
+
+mercan_embedder * mercan_embedder_create_v1(mercan_model * model, mercan_context_params params, int pooling) {
+    g_last_error.clear();
+    if (!model || (!model->impl && !model->generic)) { set_error("invalid model"); return nullptr; }
+    if (!model->impl) {
+        set_error("embeddings are not supported for plugin-managed architecture '" + model->architecture_name + "'");
+        return nullptr;
+    }
+    if (pooling != MERCAN_POOLING_MEAN && pooling != MERCAN_POOLING_LAST) {
+        set_error("pooling must be MERCAN_POOLING_MEAN or MERCAN_POOLING_LAST"); return nullptr;
+    }
+    if (!params.n_ctx || params.n_threads <= 0 || params.n_threads_batch <= 0) {
+        set_error("embedding context needs positive n_ctx and thread counts"); return nullptr;
+    }
+    try {
+        llama_context_params cp = llama_context_default_params();
+        cp.n_ctx = params.n_ctx;
+        // A pooled sequence has to be decoded as a single micro-batch.
+        cp.n_batch = cp.n_ubatch = params.n_ctx;
+        cp.n_seq_max = 1;
+        cp.n_threads = params.n_threads; cp.n_threads_batch = params.n_threads_batch;
+        cp.embeddings = true;
+        cp.pooling_type = pooling == MERCAN_POOLING_LAST ? LLAMA_POOLING_TYPE_LAST : LLAMA_POOLING_TYPE_MEAN;
+        llama_context * lc = llama_init_from_model(model->impl, cp);
+        if (!lc) { set_error("failed to create embedding context"); return nullptr; }
+        auto * out = new mercan_embedder();
+        out->model = model;
+        out->impl = lc;
+        out->size = llama_model_n_embd_out(model->impl);
+        out->n_ctx = llama_n_ctx(lc);
+        return out;
+    } catch (const std::exception & e) { set_error(e.what()); }
+    catch (...) { set_error("unknown error while creating embedder"); }
+    return nullptr;
+}
+
+int32_t mercan_embedder_size_v1(const mercan_embedder * embedder) {
+    return embedder ? embedder->size : 0;
+}
+
+int32_t mercan_embed_v1(mercan_embedder * embedder, const char * text, size_t text_len,
+                        float * out, int32_t capacity) {
+    g_last_error.clear();
+    if (!embedder || !embedder->impl || !text || !out) { set_error("invalid embed arguments"); return -1; }
+    if (capacity < embedder->size) { set_error("output capacity is smaller than the embedding size"); return -1; }
+    try {
+        std::lock_guard<std::mutex> lock(embedder->mutex);
+        std::vector<mercan_token> tokens(text_len + 16);
+        int32_t n = mercan_tokenize(embedder->model, text, text_len, true, false,
+                                    tokens.data(), static_cast<int32_t>(tokens.size()));
+        if (n < 0) {
+            tokens.resize(static_cast<size_t>(-n));
+            n = mercan_tokenize(embedder->model, text, text_len, true, false,
+                                tokens.data(), static_cast<int32_t>(tokens.size()));
+        }
+        if (n <= 0) {
+            if (g_last_error.empty()) set_error("text produced no tokens");
+            return -1;
+        }
+        n = std::min(n, static_cast<int32_t>(embedder->n_ctx));
+        llama_memory_clear(llama_get_memory(embedder->impl), true);
+        llama_batch batch = llama_batch_init(n, 0, 1);
+        for (int32_t i = 0; i < n; ++i) {
+            batch.token[i] = tokens[i];
+            batch.pos[i] = i;
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i] = 1;
+        }
+        batch.n_tokens = n;
+        const int rc = llama_decode(embedder->impl, batch);
+        llama_batch_free(batch);
+        if (rc != 0) { set_error("llama_decode failed with code " + std::to_string(rc)); return -1; }
+        const float * pooled = llama_get_embeddings_seq(embedder->impl, 0);
+        if (!pooled) { set_error("backend returned no pooled embedding"); return -1; }
+        std::memcpy(out, pooled, sizeof(float) * static_cast<size_t>(embedder->size));
+        return embedder->size;
+    } catch (const std::exception & e) { set_error(e.what()); }
+    catch (...) { set_error("unknown error while embedding"); }
+    return -1;
+}
+
+void mercan_embedder_free_v1(mercan_embedder * embedder) {
+    delete embedder;
 }
 
 } // extern "C"

@@ -192,6 +192,11 @@ turns. Separate sessions share model weights and own independent KV caches.
 Reset, cancellation and explicit successful-turn commits are covered by
 [Session API v1](docs/SESSION_API_V1.md).
 
+The embedding API returns pooled final-layer vectors (mean or last token) from
+an owned context next to sessions on the same weights. EthosoftLib exposes it
+as `Model.embed()` for local retrieval. Measured quality and intended use are in
+[Embedding API v1](docs/EMBEDDING_API_V1.md).
+
 
 | Surface | Header | What it provides | Docs |
 |---|---|---|---|

@@ -189,6 +189,25 @@ MERCAN_API const char * mercan_session_stats_json_v1(const mercan_session *);
 // Returns -1 while a request is outstanding; the session remains alive.
 MERCAN_API int mercan_session_free_v1(mercan_session *);
 
+// Embedding API v1: one pooled vector of the final normalized hidden states per
+// text, for retrieval. Borrowed model, owned context; serialize calls per handle.
+// Vectors are not L2-normalized. Texts longer than n_ctx tokens are truncated.
+// Only backend-managed architectures are supported; others fail at create().
+#define MERCAN_EMBEDDING_API_VERSION 1
+enum mercan_pooling_v1 {
+    MERCAN_POOLING_MEAN = 0,
+    MERCAN_POOLING_LAST = 1
+};
+typedef struct mercan_embedder mercan_embedder;
+MERCAN_API uint32_t mercan_embedding_api_version(void);
+MERCAN_API mercan_embedder * mercan_embedder_create_v1(mercan_model *, mercan_context_params, int pooling);
+MERCAN_API int32_t mercan_embedder_size_v1(const mercan_embedder *);
+// Returns the number of floats written (the embedding size), or -1 on error
+// (mercan_last_error). capacity must be at least mercan_embedder_size_v1().
+MERCAN_API int32_t mercan_embed_v1(mercan_embedder *, const char * text, size_t text_len,
+                                   float * out, int32_t capacity);
+MERCAN_API void mercan_embedder_free_v1(mercan_embedder *);
+
 #ifdef __cplusplus
 }
 #endif
