@@ -76,6 +76,9 @@ MERCAN_API const char * mercan_model_device_json_v1(const mercan_model * model);
 
 MERCAN_API mercan_context * mercan_context_create(mercan_model * model, mercan_context_params params);
 MERCAN_API void mercan_context_free(mercan_context * ctx);
+// Discard a decoded suffix. Call only while idle; recurrent backends may reject
+// partial truncation, in which case sessions safely recreate their context.
+MERCAN_API int mercan_context_truncate_v1(mercan_context * ctx, uint32_t keep_tokens);
 
 // Returns token count on success. If capacity is too small, returns -required_count.
 MERCAN_API int32_t mercan_tokenize(
@@ -163,6 +166,28 @@ MERCAN_API int mercan_generation_run_v1(mercan_generation *, mercan_generation_c
 MERCAN_API void mercan_generation_cancel_v1(mercan_generation *);
 MERCAN_API int mercan_generation_finish_reason_v1(const mercan_generation *);
 MERCAN_API void mercan_generation_free_v1(mercan_generation *);
+
+// Session API v1: borrowed model, owned persistent context/KV cache. Supply the
+// complete prompt/transcript each turn; an exact token prefix is reused.
+// One outstanding request per session, including completed but unfreed requests.
+// Serialize calls per handle except generation_cancel(). Keep the model alive.
+#define MERCAN_SESSION_API_VERSION 1
+typedef struct mercan_session mercan_session;
+MERCAN_API uint32_t mercan_session_api_version(void);
+MERCAN_API mercan_session * mercan_session_create_v1(mercan_model *, mercan_context_params);
+MERCAN_API mercan_generation * mercan_session_generate_begin_v1(
+    mercan_session *, const char *, size_t, const mercan_generation_params_v1 *);
+MERCAN_API mercan_generation * mercan_session_chat_begin_v1(
+    mercan_session *, const mercan_chat_message_v1 *, size_t,
+    const char *, const char *, const char *, const mercan_generation_params_v1 *);
+// Explicitly retain a successfully completed turn before freeing the request.
+// Uncommitted, failed or cancelled work invalidates the cache if it was touched.
+MERCAN_API int mercan_generation_commit_session_v1(mercan_generation *);
+MERCAN_API int mercan_session_reset_v1(mercan_session *);
+// Borrowed thread-local JSON until next stats call. Requires an idle session.
+MERCAN_API const char * mercan_session_stats_json_v1(const mercan_session *);
+// Returns -1 while a request is outstanding; the session remains alive.
+MERCAN_API int mercan_session_free_v1(mercan_session *);
 
 #ifdef __cplusplus
 }

@@ -517,6 +517,14 @@ void mercan_generic_context_free(mercan_generic_context * c) {
     delete c;
 }
 
+bool mercan_generic_context_truncate(mercan_generic_context * c, uint32_t keep) {
+    if (!c || keep > c->n_past) return false;
+    // Cache positions beyond n_past are ignored and overwritten on the next decode.
+    c->n_past = keep;
+    c->logits.clear();
+    return true;
+}
+
 int32_t mercan_generic_decode(mercan_generic_context * c, const mercan_token * tokens, int32_t n, std::string & error) {
     if (!c || !tokens || n <= 0) { error = "invalid generic decode arguments"; return -1; }
     if (static_cast<uint64_t>(c->n_past) + static_cast<uint64_t>(n) > c->params.n_ctx) {

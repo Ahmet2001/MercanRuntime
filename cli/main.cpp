@@ -20,7 +20,7 @@
 
 namespace fs = std::filesystem;
 
-static constexpr const char * VERSION = "0.3.0";
+static constexpr const char * VERSION = "0.4.0";
 
 static void die(const std::string & message) {
     std::cerr << "mercan: " << message << "\n";
@@ -449,7 +449,8 @@ static int receive_generation(const char * bytes, size_t size, void * user) {
     return 1;
 }
 static std::string generate(mercan_model * model, const run_options & opt,
-                            const chat_messages & messages, bool stream_to_stdout = true) {
+                            const chat_messages & messages, bool stream_to_stdout = true,
+                            mercan_session * session = nullptr) {
     auto cp = mercan_context_default_params();
     if (opt.threads > 0) cp.n_threads = cp.n_threads_batch = opt.threads;
     mercan_generation_params_v1 params{};
@@ -465,11 +466,14 @@ static std::string generate(mercan_model * model, const run_options & opt,
     std::vector<mercan_chat_message_v1> native_messages;
     for (const auto & message : messages)
         native_messages.push_back({message.first.c_str(), message.second.data(), message.second.size()});
-    auto * request = mercan_chat_begin_v1(model, native_messages.data(), native_messages.size(),
+    auto * request = session ? mercan_session_chat_begin_v1(session, native_messages.data(), native_messages.size(),
+        opt.role_system.c_str(), opt.role_user.c_str(), opt.role_assistant.c_str(), &params) :
+        mercan_chat_begin_v1(model, native_messages.data(), native_messages.size(),
         opt.role_system.c_str(), opt.role_user.c_str(), opt.role_assistant.c_str(), cp, &params);
     if (!request) die(std::string("generation initialization failed: ") + mercan_last_error());
     cli_output output{{}, stream_to_stdout};
-    const int rc = mercan_generation_run_v1(request, receive_generation, &output);
+    int rc = mercan_generation_run_v1(request, receive_generation, &output);
+    if (session && rc == 0 && mercan_generation_commit_session_v1(request) != 0) rc = -1;
     const std::string error = rc < 0 ? mercan_last_error() : "";
     mercan_generation_free_v1(request);
     if (rc < 0) die("generation failed: " + error);
@@ -607,6 +611,10 @@ static int command_run(int argc, char ** argv) {
     if (!model) die(std::string("model load failed: ") + mercan_last_error());
     std::cout << "Backend: " << mercan_model_device_v1(model) << "\n";
 
+    auto cp = mercan_context_default_params();
+    if (opt.threads > 0) cp.n_threads = cp.n_threads_batch = opt.threads;
+    auto * session = mercan_session_create_v1(model, cp);
+    if (!session) die(std::string("session creation failed: ") + mercan_last_error());
     chat_messages transcript;
     if (!opt.system.empty()) transcript.emplace_back("system", opt.system);
 
@@ -617,7 +625,7 @@ static int command_run(int argc, char ** argv) {
             if (!context.empty()) user_content = context + "\n\nKullanicinin sorusu: " + opt.prompt;
         }
         transcript.emplace_back("user", user_content);
-        generate(model, opt, transcript);
+        generate(model, opt, transcript, true, session);
         std::cout << "\n";
     } else {
         std::cout << "Mercan ready. Type /exit to quit.\n\n";
@@ -633,12 +641,13 @@ static int command_run(int argc, char ** argv) {
                 if (!context.empty()) user_content = context + "\n\nKullanicinin sorusu: " + line;
             }
             transcript.emplace_back("user", user_content);
-            const std::string answer = generate(model, opt, transcript);
+            const std::string answer = generate(model, opt, transcript, true, session);
             std::cout << "\n\n";
             transcript.emplace_back("assistant", answer);
         }
     }
 
+    mercan_session_free_v1(session);
     mercan_model_free(model);
     mercan_backend_free();
     return 0;

@@ -186,6 +186,12 @@ placement queries. `mercan devices` prints a capability snapshot; explicit
 GPU requests fail instead of silently using CPU. See
 [Device API v1](docs/DEVICE_API_V1.md).
 
+MercanRuntime 0.4.0 adds persistent native sessions. The interactive CLI and
+EthosoftLib 0.8.0 retain a chat context and reuse its verified token prefix across
+turns. Separate sessions share model weights and own independent KV caches.
+Reset, cancellation and explicit successful-turn commits are covered by
+[Session API v1](docs/SESSION_API_V1.md).
+
 
 | Surface | Header | What it provides | Docs |
 |---|---|---|---|

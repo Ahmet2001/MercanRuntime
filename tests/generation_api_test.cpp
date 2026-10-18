@@ -21,6 +21,13 @@ int main() {
     CHECK(mercan_generation_run_v1(nullptr, nullptr, nullptr) == -1);
     mercan_generation_cancel_v1(nullptr);
     mercan_generation_free_v1(nullptr);
+    CHECK(mercan_session_api_version() == 1);
+    CHECK(mercan_session_create_v1(nullptr, mercan_context_default_params()) == nullptr);
+    CHECK(mercan_session_generate_begin_v1(nullptr, "hi", 2, nullptr) == nullptr);
+    CHECK(mercan_generation_commit_session_v1(nullptr) == -1);
+    CHECK(mercan_session_reset_v1(nullptr) == -1);
+    CHECK(mercan_session_stats_json_v1(nullptr) == nullptr);
+    CHECK(mercan_session_free_v1(nullptr) == 0);
     std::mt19937 rng(42);
     const float logits[] = {0, 4, 3};
     p.temperature = 0; p.repeat_penalty = 2;

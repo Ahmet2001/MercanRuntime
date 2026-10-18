@@ -4,10 +4,26 @@
 #include <climits>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
 void mercan_generation_set_error(const std::string &);
+
+struct mercan_session {
+    mercan_model * model = nullptr;
+    mercan_context_params params{};
+    mercan_context * context = nullptr;
+    std::vector<mercan_token> tokens;
+    mutable std::mutex mutex;
+    bool busy = false;
+    size_t reused = 0, prefilled = 0, allocations = 0;
+    void discard() {
+        mercan_context_free(context); context = nullptr;
+        tokens.clear(); reused = prefilled = 0;
+    }
+    ~mercan_session() { mercan_context_free(context); }
+};
 
 struct mercan_generation {
     mercan_model * model = nullptr;
@@ -18,7 +34,14 @@ struct mercan_generation {
     std::atomic<bool> cancelled{false};
     std::atomic<bool> started{false};
     std::atomic<int> finish{MERCAN_GENERATION_PENDING};
-    ~mercan_generation() { mercan_context_free(context); }
+    mercan_session * session = nullptr;
+    bool touched = false, committed = false;
+    ~mercan_generation() {
+        if (!session) { mercan_context_free(context); return; }
+        std::lock_guard<std::mutex> lock(session->mutex);
+        if (touched && !committed) session->discard();
+        session->busy = false;
+    }
 };
 
 namespace {
@@ -101,6 +124,31 @@ std::string format_chat(const mercan_chat_message_v1 * messages, size_t count,
     }
     return out + "<|im_start|>" + ah + "\n";
 }
+size_t prepare_session(mercan_generation * g) {
+    auto & s = *g->session;
+    g->touched = true;
+    size_t reuse = 0;
+    while (reuse < s.tokens.size() && reuse < g->prompt.size() &&
+           s.tokens[reuse] == g->prompt[reuse]) ++reuse;
+    // Always decode at least one input token to obtain valid next-token logits.
+    reuse = std::min(reuse, g->prompt.size() - 1);
+    if (s.context && reuse < s.tokens.size() &&
+        mercan_context_truncate_v1(s.context, static_cast<uint32_t>(reuse)) != 0) {
+        s.discard(); reuse = 0;
+    }
+    if (!s.context) {
+        s.context = mercan_context_create(s.model, s.params);
+        if (!s.context) throw native_error("session context creation failed");
+        ++s.allocations; reuse = 0;
+    }
+    g->context = s.context;
+    if (g->prompt.size() + static_cast<size_t>(g->params.max_tokens) > mercan_context_size(s.context))
+        throw std::invalid_argument("prompt + max_tokens exceeds native context size");
+    s.tokens.resize(reuse);
+    s.tokens.reserve(g->prompt.size() + static_cast<size_t>(g->params.max_tokens));
+    s.reused = reuse; s.prefilled = 0;
+    return reuse;
+}
 }
 
 extern "C" {
@@ -158,10 +206,15 @@ int mercan_generation_run_v1(mercan_generation * g, mercan_generation_callback_v
             if (!g->cancelled.load()) return false;
             g->finish = MERCAN_GENERATION_CANCELLED; return true;
         };
-        for (size_t i = 0; i < g->prompt.size();) {
+        if (cancelled()) return 1;
+        for (size_t i = g->session ? prepare_session(g) : 0; i < g->prompt.size();) {
             if (cancelled()) return 1;
             const int32_t n = static_cast<int32_t>(std::min<size_t>(g->context_params.n_batch, g->prompt.size() - i));
             if (mercan_decode(g->context, g->prompt.data() + i, n) != 0) throw native_error("prompt decode failed");
+            if (g->session) {
+                g->session->tokens.insert(g->session->tokens.end(), g->prompt.begin() + i, g->prompt.begin() + i + n);
+                g->session->prefilled += static_cast<size_t>(n);
+            }
             i += n;
         }
         std::vector<mercan_token> stops;
@@ -183,7 +236,10 @@ int mercan_generation_run_v1(mercan_generation * g, mercan_generation_callback_v
                 recent.push_back(token);
                 if (recent.size() > static_cast<size_t>(p.repeat_last_n)) recent.erase(recent.begin());
             }
-            if (i + 1 < p.max_tokens && mercan_decode(g->context, &token, 1) != 0) throw native_error("generation decode failed");
+            if (i + 1 < p.max_tokens) {
+                if (mercan_decode(g->context, &token, 1) != 0) throw native_error("generation decode failed");
+                if (g->session) g->session->tokens.push_back(token);
+            }
         }
         g->finish = MERCAN_GENERATION_LIMIT; return 0;
     } catch (const std::exception & e) { mercan_generation_set_error(e.what()); }
@@ -193,4 +249,90 @@ int mercan_generation_run_v1(mercan_generation * g, mercan_generation_callback_v
 void mercan_generation_cancel_v1(mercan_generation * g) { if (g) g->cancelled = true; }
 int mercan_generation_finish_reason_v1(const mercan_generation * g) { return g ? g->finish.load() : MERCAN_GENERATION_ERROR; }
 void mercan_generation_free_v1(mercan_generation * g) { delete g; }
+
+uint32_t mercan_session_api_version(void) { return MERCAN_SESSION_API_VERSION; }
+mercan_session * mercan_session_create_v1(mercan_model * model, mercan_context_params cp) {
+    mercan_generation_set_error("");
+    try {
+        if (!model) throw std::invalid_argument("invalid session model");
+        validate(defaults(), cp);
+        auto s = std::make_unique<mercan_session>();
+        s->model = model; s->params = cp;
+        return s.release();
+    } catch (const std::exception & e) { mercan_generation_set_error(e.what()); }
+    catch (...) { mercan_generation_set_error("session creation failed"); }
+    return nullptr;
+}
+mercan_generation * mercan_session_generate_begin_v1(mercan_session * s, const char * text,
+        size_t size, const mercan_generation_params_v1 * params) {
+    mercan_generation_set_error("");
+    try {
+        if (!s) throw std::invalid_argument("invalid session");
+        std::lock_guard<std::mutex> lock(s->mutex);
+        if (s->busy) throw std::invalid_argument("session already has an outstanding request");
+        if (params && params->struct_size < sizeof(*params)) throw std::invalid_argument("generation params struct_size is too small");
+        const auto p = params ? *params : defaults();
+        validate(p, s->params);
+        auto g = std::make_unique<mercan_generation>();
+        g->model = s->model; g->params = p; g->context_params = s->params;
+        g->prompt = tokenize(s->model, text, size);
+        if (g->prompt.size() + static_cast<size_t>(p.max_tokens) > s->params.n_ctx)
+            throw std::invalid_argument("prompt + max_tokens exceeds n_ctx");
+        s->busy = true; g->session = s;
+        return g.release();
+    } catch (const std::exception & e) { mercan_generation_set_error(e.what()); }
+    catch (...) { mercan_generation_set_error("session request creation failed"); }
+    return nullptr;
+}
+mercan_generation * mercan_session_chat_begin_v1(mercan_session * s,
+        const mercan_chat_message_v1 * messages, size_t count, const char * system,
+        const char * user, const char * assistant, const mercan_generation_params_v1 * params) {
+    mercan_generation_set_error("");
+    try {
+        const auto prompt = format_chat(messages, count, system, user, assistant);
+        return mercan_session_generate_begin_v1(s, prompt.data(), prompt.size(), params);
+    } catch (const std::exception & e) { mercan_generation_set_error(e.what()); }
+    catch (...) { mercan_generation_set_error("session chat formatting failed"); }
+    return nullptr;
+}
+int mercan_generation_commit_session_v1(mercan_generation * g) {
+    mercan_generation_set_error("");
+    if (!g || !g->session || (g->finish != MERCAN_GENERATION_STOP && g->finish != MERCAN_GENERATION_LIMIT)) {
+        mercan_generation_set_error("only a successfully completed session request can be committed"); return -1;
+    }
+    g->committed = true; return 0;
+}
+int mercan_session_reset_v1(mercan_session * s) {
+    mercan_generation_set_error("");
+    if (!s) { mercan_generation_set_error("invalid session"); return -1; }
+    std::lock_guard<std::mutex> lock(s->mutex);
+    if (s->busy) { mercan_generation_set_error("session has an outstanding request"); return -1; }
+    s->discard(); return 0;
+}
+const char * mercan_session_stats_json_v1(const mercan_session * s) {
+    static thread_local std::string out;
+    mercan_generation_set_error("");
+    try {
+        if (!s) throw std::invalid_argument("invalid session");
+        std::lock_guard<std::mutex> lock(s->mutex);
+        if (s->busy) throw std::invalid_argument("session has an outstanding request");
+        out = "{\"cached_tokens\":" + std::to_string(s->tokens.size()) +
+            ",\"reused_tokens\":" + std::to_string(s->reused) +
+            ",\"prefill_tokens\":" + std::to_string(s->prefilled) +
+            ",\"context_allocations\":" + std::to_string(s->allocations) +
+            ",\"context_size\":" + std::to_string(s->context ? mercan_context_size(s->context) : s->params.n_ctx) + "}";
+        return out.c_str();
+    } catch (const std::exception & e) { mercan_generation_set_error(e.what()); }
+    catch (...) { mercan_generation_set_error("session stats failed"); }
+    return nullptr;
+}
+int mercan_session_free_v1(mercan_session * s) {
+    mercan_generation_set_error("");
+    if (!s) return 0;
+    {
+        std::lock_guard<std::mutex> lock(s->mutex);
+        if (s->busy) { mercan_generation_set_error("session has an outstanding request"); return -1; }
+    }
+    delete s; return 0;
+}
 }

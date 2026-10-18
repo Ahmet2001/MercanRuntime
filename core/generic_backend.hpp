@@ -21,6 +21,7 @@ mercan_generic_context * mercan_generic_context_create(mercan_generic_model * mo
                                                         mercan_context_params params,
                                                         std::string & error);
 void mercan_generic_context_free(mercan_generic_context * ctx);
+bool mercan_generic_context_truncate(mercan_generic_context * ctx, uint32_t keep);
 int32_t mercan_generic_decode(mercan_generic_context * ctx,
                               const mercan_token * tokens,
                               int32_t n_tokens,

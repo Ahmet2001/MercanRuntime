@@ -33,6 +33,7 @@ struct mercan_context {
     llama_context * impl = nullptr;
     mercan_generic_context * generic = nullptr;
     mercan_model * model = nullptr;
+    uint32_t tokens = 0;
 };
 
 static thread_local std::string g_last_error;
@@ -55,7 +56,7 @@ static void mercan_llama_log(enum ggml_log_level level, const char * text, void 
 extern "C" {
 
 const char * mercan_version(void) {
-    return "0.3.0";
+    return "0.4.0";
 }
 
 uint32_t mercan_abi_version(void) {
@@ -422,6 +423,31 @@ void mercan_context_free(mercan_context * ctx) {
     delete ctx;
 }
 
+int mercan_context_truncate_v1(mercan_context * ctx, uint32_t keep) {
+    g_last_error.clear();
+    if (!ctx || keep > ctx->tokens) { set_error("invalid context truncation"); return -1; }
+    try {
+        if (ctx->generic) {
+            if (!mercan_generic_context_truncate(ctx->generic, keep)) {
+                set_error("generic context truncation failed"); return -1;
+            }
+        } else if (ctx->impl) {
+            auto memory = llama_get_memory(ctx->impl);
+            if (!keep) llama_memory_clear(memory, false);
+            else if (llama_memory_seq_pos_min(memory, 0) > 0) {
+                set_error("partial truncation requires rebuilding evicted sliding-window history"); return -1;
+            }
+            else if (!llama_memory_seq_rm(memory, -1, static_cast<llama_pos>(keep), -1)) {
+                set_error("backend does not support partial context truncation"); return -1;
+            }
+        } else { set_error("invalid context"); return -1; }
+        ctx->tokens = keep;
+        return 0;
+    } catch (const std::exception & e) { set_error(e.what()); }
+    catch (...) { set_error("context truncation failed"); }
+    return -1;
+}
+
 int32_t mercan_tokenize(
     mercan_model * model,
     const char * text,
@@ -461,12 +487,15 @@ int32_t mercan_decode(mercan_context * ctx, const mercan_token * tokens, int32_t
         return -1;
     }
     if (ctx->generic) {
-        std::string e; const int rc = mercan_generic_decode(ctx->generic, tokens, n_tokens, e); if (rc != 0) set_error(e); return rc;
+        std::string e; const int rc = mercan_generic_decode(ctx->generic, tokens, n_tokens, e);
+        if (rc != 0) set_error(e); else ctx->tokens += static_cast<uint32_t>(n_tokens);
+        return rc;
     }
     llama_batch batch = llama_batch_get_one(
         const_cast<llama_token *>(reinterpret_cast<const llama_token *>(tokens)),
         n_tokens);
     const int rc = llama_decode(ctx->impl, batch);
+    if (rc == 0) ctx->tokens += static_cast<uint32_t>(n_tokens);
     if (rc != 0) set_error("llama_decode failed with code " + std::to_string(rc));
     return rc;
 }

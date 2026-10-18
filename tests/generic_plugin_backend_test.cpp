@@ -191,6 +191,57 @@ int main(int argc, char ** argv) {
     mercan_model_free(stop_model);
     std::remove(stop_path.c_str());
 
+    auto * session = mercan_session_create_v1(m, cp);
+    if (!session) return fail("session create");
+    auto session_turn = [&](const char * prompt) {
+        auto * turn = mercan_session_generate_begin_v1(session, prompt, std::strlen(prompt), &gp);
+        if (!turn) return false;
+        std::string cached, cold;
+        bool ok = mercan_generation_run_v1(turn, collect, &cached) == 0;
+        ok = ok && mercan_generation_commit_session_v1(turn) == 0;
+        mercan_generation_free_v1(turn);
+        auto * baseline = mercan_generate_begin_v1(m, prompt, std::strlen(prompt), cp, &gp);
+        if (!baseline) return false;
+        ok = ok && mercan_generation_run_v1(baseline, collect, &cold) == 0 && cached == cold;
+        mercan_generation_free_v1(baseline);
+        return ok;
+    };
+    if (!session_turn("AB")) return fail("first cached turn");
+    request = mercan_session_generate_begin_v1(session, "AB??B", 5, &gp);
+    if (!request) return fail("session pre-cancel begin");
+    mercan_generation_cancel_v1(request);
+    if (mercan_generation_run_v1(request, collect, &generated) != 1) return fail("session pre-cancel");
+    mercan_generation_free_v1(request);
+    if (std::string(mercan_session_stats_json_v1(session)).find("\"cached_tokens\":3") == std::string::npos)
+        return fail("untouched cache discarded");
+    if (!session_turn("AB??B")) return fail("continued cached turn");
+    std::string stats = mercan_session_stats_json_v1(session);
+    if (stats.find("\"reused_tokens\":3") == std::string::npos ||
+        stats.find("\"context_allocations\":1") == std::string::npos) return fail("prefix was not reused");
+    if (!session_turn("BB")) return fail("changed prefix differs from cold output");
+    stats = mercan_session_stats_json_v1(session);
+    if (stats.find("\"reused_tokens\":0") == std::string::npos ||
+        stats.find("\"context_allocations\":1") == std::string::npos) return fail("prefix truncation recreated context");
+    request = mercan_session_generate_begin_v1(session, "BB!B", 4, &gp);
+    if (!request) return fail("session cancelled turn begin");
+    if (mercan_session_reset_v1(session) != -1 || mercan_session_free_v1(session) != -1 ||
+        mercan_session_generate_begin_v1(session, "B", 1, &gp)) return fail("busy session accepted operation");
+    if (mercan_generation_run_v1(request, cancel, nullptr) != 1 ||
+        mercan_generation_commit_session_v1(request) != -1) return fail("session cancellation committed");
+    mercan_generation_free_v1(request);
+    stats = mercan_session_stats_json_v1(session);
+    if (stats.find("\"cached_tokens\":0") == std::string::npos) return fail("cancelled cache retained");
+    if (!session_turn("AB")) return fail("session restart after cancellation");
+    if (mercan_session_reset_v1(session) != 0) return fail("session reset");
+    stats = mercan_session_stats_json_v1(session);
+    if (stats.find("\"cached_tokens\":0") == std::string::npos) return fail("reset retained tokens");
+    if (!session_turn("AB")) return fail("session resume after reset");
+    request = mercan_session_generate_begin_v1(session, "AB??B", 5, &gp);
+    if (!request || mercan_generation_run_v1(request, collect, &generated) != 0) return fail("uncommitted session turn");
+    mercan_generation_free_v1(request);
+    if (std::string(mercan_session_stats_json_v1(session)).find("\"cached_tokens\":0") == std::string::npos)
+        return fail("uncommitted cache retained");
+    if (mercan_session_free_v1(session) != 0) return fail("session free");
     mercan_model_free(m);
     mercan_backend_free();
     std::remove(argv[2]);
