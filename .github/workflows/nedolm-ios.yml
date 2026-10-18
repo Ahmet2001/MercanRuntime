@@ -54,6 +54,10 @@ jobs:
             echo "::error::runtime/libmercan/include/mercan_tensor.h eksik"
             exit 7
           }
+          test -s runtime/libmercan/include/mercan_kv.h || {
+            echo "::error::runtime/libmercan/include/mercan_kv.h eksik"
+            exit 8
+          }
 
       - name: Build current NDSRF004 FFI for iPhone arm64
         shell: bash
@@ -128,6 +132,7 @@ jobs:
           cp "$GITHUB_WORKSPACE/runtime/nedolm/nedolm.cpp" src/models/nedolm.cpp
           cp "$GITHUB_WORKSPACE/runtime/libmercan/include/mercan_tensor.h" src/models/mercan_tensor.h
           cp "$GITHUB_WORKSPACE/runtime/libmercan/include/mercan_graph.h" src/models/mercan_graph.h
+          cp "$GITHUB_WORKSPACE/runtime/libmercan/include/mercan_kv.h" src/models/mercan_kv.h
           cp "$GITHUB_WORKSPACE/runtime/nedolm/mercan_graph_ggml.hpp" src/models/mercan_graph_ggml.hpp
 
           # Silo was compiled against an older llama C ABI. Keep Silo's original
@@ -185,11 +190,19 @@ jobs:
           from pathlib import Path
           p = Path('src/CMakeLists.txt')
           s = p.read_text()
-          old = 'target_link_libraries(llama PRIVATE nedo004_ffi dl pthread m)'
-          new = 'target_link_libraries(llama PRIVATE nedo004_ffi)\ntarget_sources(llama PRIVATE nedolm-silo-abi.cpp)'
-          if old not in s:
-              raise SystemExit('NedoLM FFI CMake linkage anchor not found')
-          p.write_text(s.replace(old, new, 1))
+          # iOS links libSystem implicitly; keep only the Rust FFI and add the
+          # Silo ABI wrappers next to it.
+          replacements = [
+              ('target_link_libraries(llama PRIVATE nedo004_ffi ${CMAKE_DL_LIBS})',
+               'target_link_libraries(llama PRIVATE nedo004_ffi)\n'
+               '    target_sources(llama PRIVATE nedolm-silo-abi.cpp)'),
+              ('        target_link_libraries(llama PRIVATE pthread m)\n', ''),
+          ]
+          for old, new in replacements:
+              if s.count(old) != 1:
+                  raise SystemExit(f'NedoLM FFI CMake linkage anchor not found: {old.strip()}')
+              s = s.replace(old, new, 1)
+          p.write_text(s)
           PY
 
       - name: Build NedoLM llama framework for iPhone arm64
