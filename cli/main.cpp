@@ -452,13 +452,20 @@ static std::string token_piece(mercan_model * model, mercan_token token) {
 
 static mercan_token sample_token(
     const float * raw_logits, int32_t n_vocab, float temperature, int top_k, float top_p,
-    float repeat_penalty, const std::vector<mercan_token> & recent_tokens, std::mt19937 & rng) {
+    float repeat_penalty, const std::vector<mercan_token> & recent_tokens,
+    mercan_token eos, mercan_token message_start, mercan_token message_end,
+    std::mt19937 & rng) {
     if (!raw_logits || n_vocab <= 0) die("no logits available");
 
     std::vector<float> adjusted(raw_logits, raw_logits + n_vocab);
     if (repeat_penalty != 1.0f) {
-        for (mercan_token t : recent_tokens) {
-            if (t < 0 || t >= n_vocab) continue;
+        // Penalize each generated token once, regardless of how often it appeared.
+        // Keep conversation terminators available so the model can stop naturally.
+        std::vector<mercan_token> distinct_tokens = recent_tokens;
+        std::sort(distinct_tokens.begin(), distinct_tokens.end());
+        distinct_tokens.erase(std::unique(distinct_tokens.begin(), distinct_tokens.end()), distinct_tokens.end());
+        for (mercan_token t : distinct_tokens) {
+            if (t < 0 || t >= n_vocab || t == eos || t == message_start || t == message_end) continue;
             float & v = adjusted[static_cast<size_t>(t)];
             v = v > 0.0f ? v / repeat_penalty : v * repeat_penalty;
         }
@@ -504,14 +511,11 @@ static mercan_token sample_token(
 }
 
 static constexpr const char * DEFAULT_SYSTEM_PROMPT =
-    "Sen Mercan'sın, MercanAI tarafından Türkçe konuşan kullanıcılar için geliştirilmiş "
-    "bir yapay zeka asistanısın. Sorulara açık, doğru ve anlaşılır bir Türkçeyle yanıt "
-    "verirsin; emin olmadığın konularda bunu açıkça belirtir, tahmini bilgiyi gerçek "
-    "gibi sunmazsın. Kısa sorulara kısa ve net, ayrıntı gerektiren sorulara ise "
-    "gerektiği kadar açıklayıcı cevaplar verirsin. Kullanıcıya karşı saygılı, sabırlı "
-    "ve yardımsever bir tutum sergilersin; zararlı, yasa dışı veya güvenlik açısından "
-    "tehlikeli isteklerde bulunulduğunda kibarca reddeder, bunun yerine güvenli ve "
-    "yapıcı bir alternatif sunmaya çalışırsın.";
+    "Türkçe, doğal ve kısa yanıt ver. Kullanıcı ayrıntı istemedikçe en fazla bir kısa "
+    "cümle yaz; cevabı verdikten sonra dur. Yalnızca sorulanı yanıtla. Selamlaşmaya "
+    "kısa bir selamla karşılık ver. Kendini tanıtma, takip sorusu sorma, liste, örnek "
+    "veya yeni konu ekleme. Bilmediğin şeyi uydurma; tehlikeli isteklere kısa ve "
+    "güvenli yanıt ver.";
 
 struct run_options {
     std::string model;
@@ -521,10 +525,10 @@ struct run_options {
     std::string role_user = "kullanici";
     std::string role_assistant = "asistan";
     int max_tokens = 256;
-    float temperature = 0.7f;
+    float temperature = 0.0f;
     int top_k = 40;
     float top_p = 0.9f;
-    float repeat_penalty = 1.15f;
+    float repeat_penalty = 1.05f;
     int repeat_last_n = 64;
     bool web_search = false;
     int web_results = 3;
@@ -571,16 +575,13 @@ static std::string generate(mercan_model * model, const run_options & opt, const
     const mercan_token message_end = special_token_id(model, "<|im_end|>");
 
     const size_t history_cap = std::max(0, opt.repeat_last_n);
+    // The prompt is context, not generated output; penalizing its words distorts answers.
     std::vector<mercan_token> recent_tokens;
-    if (history_cap > 0) {
-        const size_t tail = std::min(history_cap, prompt_tokens.size());
-        recent_tokens.assign(prompt_tokens.end() - static_cast<long>(tail), prompt_tokens.end());
-    }
 
     for (int i = 0; i < opt.max_tokens; ++i) {
         mercan_token next = sample_token(
             mercan_logits(ctx), n_vocab, opt.temperature, opt.top_k, opt.top_p,
-            opt.repeat_penalty, recent_tokens, rng);
+            opt.repeat_penalty, recent_tokens, eos, message_start, message_end, rng);
         if (next == eos || next == message_start || next == message_end) break;
 
         const std::string piece = token_piece(model, next);
@@ -621,11 +622,11 @@ static void print_help() {
         << "  --role-user NAME        chat role header for user turns (default: kullanici)\n"
         << "  --role-assistant NAME   chat role header for assistant turns (default: asistan)\n"
         << "  -n, --max-tokens N      maximum generated tokens (default 256)\n"
-        << "  --temperature F         sampling temperature (default 0.7; 0 = greedy)\n"
+        << "  --temperature F         sampling temperature (default 0 = greedy)\n"
         << "  --top-k N               top-k sampling (default 40)\n"
         << "  --top-p F               nucleus cutoff (default 0.9)\n"
-        << "  --repeat-penalty F      penalty applied to recently used tokens (default 1.15; 1.0 = off)\n"
-        << "  --repeat-last-n N       how many recent tokens the penalty looks at (default 64; 0 = off)\n"
+        << "  --repeat-penalty F      penalty applied to recent generated tokens (default 1.05; 1.0 = off)\n"
+        << "  --repeat-last-n N       how many generated tokens the penalty looks at (default 64; 0 = off)\n"
         << "  --web-search            mandatory web search before every prompt (model has no tool-calling;\n"
         << "                          the CLI searches and fetches pages itself and hands the model the text).\n"
         << "                          Requires a SearXNG instance (open source, no API key); self-host it,\n"
