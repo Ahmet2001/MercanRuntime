@@ -8,14 +8,11 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <limits>
-#include <random>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -23,7 +20,7 @@
 
 namespace fs = std::filesystem;
 
-static constexpr const char * VERSION = "0.1.2";
+static constexpr const char * VERSION = "0.2.0";
 
 static void die(const std::string & message) {
     std::cerr << "mercan: " << message << "\n";
@@ -409,107 +406,6 @@ static std::string build_web_context(
     return oss.str();
 }
 
-// parse_special=true so structural markers like "<|im_start|>"/"<|im_end|>" in the
-// formatted prompt resolve to their real control token ids instead of being split as text.
-static std::vector<mercan_token> tokenize(mercan_model * model, const std::string & text) {
-    int32_t n = mercan_tokenize(model, text.data(), text.size(), false, true, nullptr, 0);
-    if (n == 0 && !text.empty()) die(std::string("tokenization failed: ") + mercan_last_error());
-    if (n < 0) n = -n;
-    std::vector<mercan_token> tokens(static_cast<size_t>(std::max(1, n)));
-    int32_t got = mercan_tokenize(model, text.data(), text.size(), false, true, tokens.data(), static_cast<int32_t>(tokens.size()));
-    if (got < 0) {
-        tokens.resize(static_cast<size_t>(-got));
-        got = mercan_tokenize(model, text.data(), text.size(), false, true, tokens.data(), static_cast<int32_t>(tokens.size()));
-    }
-    if (got < 0) die("token buffer sizing failed");
-    tokens.resize(static_cast<size_t>(got));
-    return tokens;
-}
-
-// Resolves a single structural/special token (e.g. "<|im_start|>") to its id.
-// Returns -1 if the text does not map to exactly one special token in this model's vocab.
-static mercan_token special_token_id(mercan_model * model, const std::string & text) {
-    int32_t n = mercan_tokenize(model, text.data(), text.size(), false, true, nullptr, 0);
-    if (n < 0) n = -n;
-    if (n != 1) return -1;
-    mercan_token tok = -1;
-    int32_t got = mercan_tokenize(model, text.data(), text.size(), false, true, &tok, 1);
-    if (got != 1) return -1;
-    return tok;
-}
-
-static std::string token_piece(mercan_model * model, mercan_token token) {
-    char small[64];
-    int32_t n = mercan_token_to_piece(model, token, small, sizeof(small), false);
-    if (n >= 0 && n <= static_cast<int32_t>(sizeof(small))) return std::string(small, small + n);
-    if (n < 0) {
-        std::vector<char> buf(static_cast<size_t>(-n));
-        n = mercan_token_to_piece(model, token, buf.data(), static_cast<int32_t>(buf.size()), false);
-        if (n >= 0) return std::string(buf.data(), buf.data() + n);
-    }
-    return {};
-}
-
-static mercan_token sample_token(
-    const float * raw_logits, int32_t n_vocab, float temperature, int top_k, float top_p,
-    float repeat_penalty, const std::vector<mercan_token> & recent_tokens,
-    mercan_token eos, mercan_token message_start, mercan_token message_end,
-    std::mt19937 & rng) {
-    if (!raw_logits || n_vocab <= 0) die("no logits available");
-
-    std::vector<float> adjusted(raw_logits, raw_logits + n_vocab);
-    if (repeat_penalty != 1.0f) {
-        // Penalize each generated token once, regardless of how often it appeared.
-        // Keep conversation terminators available so the model can stop naturally.
-        std::vector<mercan_token> distinct_tokens = recent_tokens;
-        std::sort(distinct_tokens.begin(), distinct_tokens.end());
-        distinct_tokens.erase(std::unique(distinct_tokens.begin(), distinct_tokens.end()), distinct_tokens.end());
-        for (mercan_token t : distinct_tokens) {
-            if (t < 0 || t >= n_vocab || t == eos || t == message_start || t == message_end) continue;
-            float & v = adjusted[static_cast<size_t>(t)];
-            v = v > 0.0f ? v / repeat_penalty : v * repeat_penalty;
-        }
-    }
-    const float * logits = adjusted.data();
-
-    if (temperature <= 0.0f) {
-        return static_cast<mercan_token>(std::max_element(logits, logits + n_vocab) - logits);
-    }
-
-    top_k = std::max(1, std::min(top_k, n_vocab));
-    std::vector<std::pair<float, int32_t>> ranked;
-    ranked.reserve(static_cast<size_t>(n_vocab));
-    for (int32_t i = 0; i < n_vocab; ++i) ranked.emplace_back(logits[i], i);
-    std::partial_sort(ranked.begin(), ranked.begin() + top_k, ranked.end(),
-        [](const auto & a, const auto & b) { return a.first > b.first; });
-    ranked.resize(static_cast<size_t>(top_k));
-
-    const float max_logit = ranked.front().first;
-    std::vector<double> weights;
-    weights.reserve(ranked.size());
-    double total = 0.0;
-    for (const auto & x : ranked) {
-        const double w = std::exp((static_cast<double>(x.first) - max_logit) / temperature);
-        weights.push_back(w);
-        total += w;
-    }
-
-    if (top_p > 0.0f && top_p < 1.0f && total > 0.0) {
-        double cumulative = 0.0;
-        size_t keep = 0;
-        for (; keep < weights.size(); ++keep) {
-            cumulative += weights[keep] / total;
-            if (cumulative >= top_p) { ++keep; break; }
-        }
-        keep = std::max<size_t>(1, std::min(keep, weights.size()));
-        ranked.resize(keep);
-        weights.resize(keep);
-    }
-
-    std::discrete_distribution<size_t> dist(weights.begin(), weights.end());
-    return static_cast<mercan_token>(ranked[dist(rng)].second);
-}
-
 static constexpr const char * DEFAULT_SYSTEM_PROMPT =
     "Türkçe, doğal ve kısa yanıt ver. Kullanıcı ayrıntı istemedikçe en fazla bir kısa "
     "cümle yaz; cevabı verdikten sonra dur. Yalnızca sorulanı yanıtla. Selamlaşmaya "
@@ -530,6 +426,8 @@ struct run_options {
     float top_p = 0.9f;
     float repeat_penalty = 1.05f;
     int repeat_last_n = 64;
+    uint32_t seed = 0;
+    bool use_seed = false;
     bool web_search = false;
     int web_results = 3;
     size_t web_chars_per_page = 1500;
@@ -543,61 +441,41 @@ struct run_options {
 #endif
 };
 
-static std::string generate(mercan_model * model, const run_options & opt, const std::string & formatted_prompt, bool stream_to_stdout = true) {
-    mercan_context_params cp = mercan_context_default_params();
+using chat_messages = std::vector<std::pair<std::string, std::string>>;
+
+struct cli_output { std::string text; bool stream; };
+static int receive_generation(const char * bytes, size_t size, void * user) {
+    auto & output = *static_cast<cli_output *>(user);
+    output.text.append(bytes, size);
+    if (output.stream) std::cout.write(bytes, static_cast<std::streamsize>(size)).flush();
+    return 1;
+}
+static std::string generate(mercan_model * model, const run_options & opt,
+                            const chat_messages & messages, bool stream_to_stdout = true) {
+    auto cp = mercan_context_default_params();
     if (opt.threads > 0) cp.n_threads = cp.n_threads_batch = opt.threads;
-    mercan_context * ctx = mercan_context_create(model, cp);
-    if (!ctx) die(std::string("context creation failed: ") + mercan_last_error());
-
-    auto prompt_tokens = tokenize(model, formatted_prompt);
-    if (prompt_tokens.empty()) {
-        mercan_context_free(ctx);
-        die("prompt produced no tokens");
-    }
-
-    const int batch_size = 512;
-    for (size_t i = 0; i < prompt_tokens.size();) {
-        const int n = static_cast<int>(std::min<size_t>(batch_size, prompt_tokens.size() - i));
-        if (mercan_decode(ctx, prompt_tokens.data() + i, n) != 0) {
-            const std::string err = mercan_last_error();
-            mercan_context_free(ctx);
-            die("prompt decode failed: " + err);
-        }
-        i += static_cast<size_t>(n);
-    }
-
-    std::random_device rd;
-    std::mt19937 rng(rd());
-    std::string text;
-    const int32_t n_vocab = mercan_vocab_size(model);
-    const mercan_token eos = mercan_eos_token(model);
-    const mercan_token message_start = special_token_id(model, "<|im_start|>");
-    const mercan_token message_end = special_token_id(model, "<|im_end|>");
-
-    const size_t history_cap = std::max(0, opt.repeat_last_n);
-    // The prompt is context, not generated output; penalizing its words distorts answers.
-    std::vector<mercan_token> recent_tokens;
-
-    for (int i = 0; i < opt.max_tokens; ++i) {
-        mercan_token next = sample_token(
-            mercan_logits(ctx), n_vocab, opt.temperature, opt.top_k, opt.top_p,
-            opt.repeat_penalty, recent_tokens, eos, message_start, message_end, rng);
-        if (next == eos || next == message_start || next == message_end) break;
-
-        const std::string piece = token_piece(model, next);
-        text += piece;
-        if (stream_to_stdout) std::cout << piece << std::flush;
-
-        if (history_cap > 0) {
-            recent_tokens.push_back(next);
-            if (recent_tokens.size() > history_cap) recent_tokens.erase(recent_tokens.begin());
-        }
-
-        if (mercan_decode(ctx, &next, 1) != 0) break;
-    }
-
-    mercan_context_free(ctx);
-    return text;
+    mercan_generation_params_v1 params{};
+    mercan_generation_default_params_v1(&params, sizeof(params));
+    params.max_tokens = opt.max_tokens;
+    params.temperature = opt.temperature;
+    params.top_k = opt.top_k;
+    params.top_p = opt.top_p;
+    params.repeat_penalty = opt.repeat_penalty;
+    params.repeat_last_n = opt.repeat_last_n;
+    params.use_seed = opt.use_seed;
+    params.seed = opt.seed;
+    std::vector<mercan_chat_message_v1> native_messages;
+    for (const auto & message : messages)
+        native_messages.push_back({message.first.c_str(), message.second.data(), message.second.size()});
+    auto * request = mercan_chat_begin_v1(model, native_messages.data(), native_messages.size(),
+        opt.role_system.c_str(), opt.role_user.c_str(), opt.role_assistant.c_str(), cp, &params);
+    if (!request) die(std::string("generation initialization failed: ") + mercan_last_error());
+    cli_output output{{}, stream_to_stdout};
+    const int rc = mercan_generation_run_v1(request, receive_generation, &output);
+    const std::string error = rc < 0 ? mercan_last_error() : "";
+    mercan_generation_free_v1(request);
+    if (rc < 0) die("generation failed: " + error);
+    return output.text;
 }
 
 static void print_help() {
@@ -623,6 +501,7 @@ static void print_help() {
         << "  --role-assistant NAME   chat role header for assistant turns (default: asistan)\n"
         << "  -n, --max-tokens N      maximum generated tokens (default 256)\n"
         << "  --temperature F         sampling temperature (default 0 = greedy)\n"
+        << "  --seed N                reproducible sampling seed (0..4294967295)\n"
         << "  --top-k N               top-k sampling (default 40)\n"
         << "  --top-p F               nucleus cutoff (default 0.9)\n"
         << "  --repeat-penalty F      penalty applied to recent generated tokens (default 1.05; 1.0 = off)\n"
@@ -687,6 +566,13 @@ static int command_run(int argc, char ** argv) {
         else if (a == "--top-p") opt.top_p = std::stof(need(a.c_str()));
         else if (a == "--repeat-penalty") opt.repeat_penalty = std::stof(need(a.c_str()));
         else if (a == "--repeat-last-n") opt.repeat_last_n = std::stoi(need(a.c_str()));
+        else if (a == "--seed") {
+            const auto value = need(a.c_str());
+            size_t end = 0;
+            const auto seed = std::stoull(value, &end);
+            if (value.empty() || value[0] == '-' || end != value.size() || seed > UINT32_MAX) die("seed must be in 0..4294967295");
+            opt.seed = static_cast<uint32_t>(seed); opt.use_seed = true;
+        }
         else if (a == "--web-search") opt.web_search = true;
         else if (a == "--web-search-url") opt.web_search_url = need(a.c_str());
         else if (a == "--web-results") opt.web_results = std::stoi(need(a.c_str()));
@@ -717,9 +603,8 @@ static int command_run(int argc, char ** argv) {
     mercan_model * model = mercan_model_load(model_path.string().c_str(), mp);
     if (!model) die(std::string("model load failed: ") + mercan_last_error());
 
-    const std::string system_prefix = opt.system.empty()
-        ? std::string()
-        : "<|im_start|>" + opt.role_system + "\n" + opt.system + "<|im_end|>\n";
+    chat_messages transcript;
+    if (!opt.system.empty()) transcript.emplace_back("system", opt.system);
 
     if (!opt.prompt.empty()) {
         std::string user_content = opt.prompt;
@@ -727,13 +612,12 @@ static int command_run(int argc, char ** argv) {
             const std::string context = build_web_context(opt.prompt, opt.web_results, opt.web_chars_per_page, opt.web_search_url);
             if (!context.empty()) user_content = context + "\n\nKullanicinin sorusu: " + opt.prompt;
         }
-        const std::string formatted = system_prefix + "<|im_start|>" + opt.role_user + "\n" + user_content + "<|im_end|>\n<|im_start|>" + opt.role_assistant + "\n";
-        generate(model, opt, formatted);
+        transcript.emplace_back("user", user_content);
+        generate(model, opt, transcript);
         std::cout << "\n";
     } else {
         std::cout << "Mercan ready. Type /exit to quit.\n\n";
         std::string line;
-        std::string transcript = system_prefix;
         while (true) {
             std::cout << "> " << std::flush;
             if (!std::getline(std::cin, line)) break;
@@ -744,10 +628,10 @@ static int command_run(int argc, char ** argv) {
                 const std::string context = build_web_context(line, opt.web_results, opt.web_chars_per_page, opt.web_search_url);
                 if (!context.empty()) user_content = context + "\n\nKullanicinin sorusu: " + line;
             }
-            transcript += "<|im_start|>" + opt.role_user + "\n" + user_content + "<|im_end|>\n<|im_start|>" + opt.role_assistant + "\n";
+            transcript.emplace_back("user", user_content);
             const std::string answer = generate(model, opt, transcript);
             std::cout << "\n\n";
-            transcript += answer + "<|im_end|>\n";
+            transcript.emplace_back("assistant", answer);
         }
     }
 

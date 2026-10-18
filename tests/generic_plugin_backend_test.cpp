@@ -22,7 +22,7 @@ static void fill_identity(ggml_tensor * t) {
     for (int64_t i = 0; i < n; ++i) p[i * t->ne[0] + i] = 1.0f;
 }
 
-static bool make_model(const char * path) {
+static bool make_model(const char * path, int history_token = 63) {
     constexpr int D = 4;
     constexpr int FF = 4;
     constexpr int VOCAB = 256;
@@ -66,7 +66,7 @@ static bool make_model(const char * path) {
     ggml_tensor * on = t1("output_norm.weight", D); fill_one(on);
     ggml_tensor * out = t2("output.weight", D, VOCAB); fill_zero(out);
     float * outp = static_cast<float *>(out->data);
-    outp[63 * D + 0] = 10.0f; // history-sensitive path => '?'
+    outp[history_token * D + 0] = 10.0f; // history-sensitive path, '?' or EOS
     outp[33 * D + 1] = 10.0f; // B-alone path => '!'
 
     gguf_context * g = gguf_init_empty();
@@ -135,6 +135,52 @@ int main(int argc, char ** argv) {
     if (mercan_token_to_piece(m, cached_best, &ch, 1, false) != 1 || ch != '?') return fail("decode piece");
     mercan_context_free(fresh);
     mercan_context_free(ctx);
+
+    // Verify the high-level native loop against the tiny real plugin model.
+    mercan_generation_params_v1 gp{};
+    mercan_generation_default_params_v1(&gp, sizeof(gp));
+    gp.max_tokens = 2; gp.temperature = 0; gp.repeat_penalty = 1;
+    auto collect = [](const char * bytes, size_t size, void * data) -> int {
+        static_cast<std::string *>(data)->append(bytes, size); return 1;
+    };
+    auto * request = mercan_generate_begin_v1(m, "AB", 2, cp, &gp);
+    if (!request) { std::cerr << mercan_last_error() << "\n"; return fail("generation begin"); }
+    std::string generated;
+    if (mercan_generation_run_v1(request, collect, &generated) != 0 || generated != "??") return fail("native generation");
+    if (mercan_generation_finish_reason_v1(request) != MERCAN_GENERATION_LIMIT) return fail("limit reason");
+    if (mercan_generation_run_v1(request, collect, &generated) != -1) return fail("repeated generation run");
+    mercan_generation_free_v1(request);
+
+    request = mercan_generate_begin_v1(m, "AB", 2, cp, &gp);
+    if (!request) return fail("cancellation begin");
+    mercan_generation_cancel_v1(request);
+    generated.clear();
+    if (mercan_generation_run_v1(request, collect, &generated) != 1 || !generated.empty()) return fail("pre-cancel");
+    if (mercan_generation_finish_reason_v1(request) != MERCAN_GENERATION_CANCELLED) return fail("cancel reason");
+    mercan_generation_free_v1(request);
+
+    request = mercan_generate_begin_v1(m, "AB", 2, cp, &gp);
+    if (!request) return fail("callback cancellation begin");
+    auto cancel = [](const char *, size_t, void *) -> int { return 0; };
+    if (mercan_generation_run_v1(request, cancel, nullptr) != 1) return fail("callback cancellation");
+    mercan_generation_free_v1(request);
+    gp.max_tokens = 100;
+    if (mercan_generate_begin_v1(m, "AB", 2, cp, &gp)) return fail("context overflow accepted");
+
+    const std::string stop_path = std::string(argv[2]) + ".stop.mercan";
+    if (!make_model(stop_path.c_str(), 255)) return fail("stop model write");
+    auto * stop_model = mercan_model_load(stop_path.c_str(), mp);
+    if (!stop_model) return fail("stop model load");
+    gp.max_tokens = 2;
+    request = mercan_generate_begin_v1(stop_model, "AB", 2, cp, &gp);
+    if (!request) return fail("stop generation begin");
+    generated.clear();
+    if (mercan_generation_run_v1(request, collect, &generated) != 0 || !generated.empty()) return fail("stop token emitted");
+    if (mercan_generation_finish_reason_v1(request) != MERCAN_GENERATION_STOP) return fail("stop reason");
+    mercan_generation_free_v1(request);
+    mercan_model_free(stop_model);
+    std::remove(stop_path.c_str());
+
     mercan_model_free(m);
     mercan_backend_free();
     std::remove(argv[2]);

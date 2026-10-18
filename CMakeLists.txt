@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(mercan VERSION 0.1.2 LANGUAGES C CXX)
+project(mercan VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,6 +25,7 @@ add_subdirectory("${MERCAN_LLAMA_DIR}" "${CMAKE_BINARY_DIR}/llama" EXCLUDE_FROM_
 
 set(MERCAN_RUNTIME_SOURCES
     runtime/libmercan/src/mercan.cpp
+    runtime/libmercan/src/generation.cpp
     core/model_loader.cpp
     core/generic_backend.cpp
     core/architecture_registry.cpp
@@ -60,6 +61,9 @@ endif()
 
 if(MERCAN_BUILD_SDK_TESTS)
     enable_testing()
+    add_executable(mercan-generation-api-test tests/generation_api_test.cpp)
+    target_link_libraries(mercan-generation-api-test PRIVATE libmercan)
+    add_test(NAME mercan-generation-api COMMAND mercan-generation-api-test)
     add_executable(mercan-runtime-abi-test tests/runtime_abi_test.cpp)
     target_link_libraries(mercan-runtime-abi-test PRIVATE libmercan)
     add_test(NAME mercan-runtime-abi COMMAND mercan-runtime-abi-test)

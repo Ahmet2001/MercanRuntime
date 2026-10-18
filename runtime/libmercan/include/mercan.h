@@ -91,6 +91,65 @@ MERCAN_API int32_t mercan_token_to_piece(
     int32_t capacity,
     bool special);
 
+// Generation API v1: one owned request/context per handle, borrowed model.
+// Keep the model alive until free(). One thread may run a handle once; cancel()
+// is safe from another thread. Free only after run() has returned. No exceptions
+// cross this boundary. Text is length-delimited UTF-8; output pieces can split a
+// UTF-8 character and must be decoded incrementally by text consumers.
+#define MERCAN_GENERATION_API_VERSION 1
+typedef struct mercan_generation mercan_generation;
+typedef struct mercan_generation_params_v1 {
+    uint32_t struct_size;
+    int32_t max_tokens;
+    float temperature;
+    int32_t top_k;
+    float top_p;
+    float repeat_penalty;
+    int32_t repeat_last_n;
+    uint32_t seed;
+    uint32_t use_seed;
+} mercan_generation_params_v1;
+
+typedef struct mercan_chat_message_v1 {
+    const char * role; // canonical: system, user, assistant
+    const char * content;
+    size_t content_len;
+} mercan_chat_message_v1;
+
+enum mercan_generation_finish_v1 {
+    MERCAN_GENERATION_PENDING = 0,
+    MERCAN_GENERATION_STOP = 1,
+    MERCAN_GENERATION_LIMIT = 2,
+    MERCAN_GENERATION_CANCELLED = 3,
+    MERCAN_GENERATION_ERROR = 4
+};
+
+// Callback returns nonzero to continue, zero to cancel. Bytes are borrowed for
+// the callback duration only. It must not throw or free the generation/model.
+typedef int (*mercan_generation_callback_v1)(const char *, size_t, void *);
+MERCAN_API uint32_t mercan_generation_api_version(void);
+MERCAN_API size_t mercan_generation_params_size_v1(void);
+MERCAN_API int mercan_generation_default_params_v1(mercan_generation_params_v1 *, size_t);
+// begin() copies the input, tokenizes and creates a fresh context. Prefill and
+// the complete sampling/decode loop execute inside run(). Null params use defaults.
+MERCAN_API mercan_generation * mercan_generate_begin_v1(
+    mercan_model *, const char *, size_t, mercan_context_params,
+    const mercan_generation_params_v1 *);
+// Chat formatting and content delimiter escaping are shared by all consumers.
+// Null role headers select sistem/kullanici/asistan. No system prompt/history
+// is inserted; the caller supplies the complete message list.
+MERCAN_API mercan_generation * mercan_chat_begin_v1(
+    mercan_model *, const mercan_chat_message_v1 *, size_t,
+    const char * role_system, const char * role_user, const char * role_assistant,
+    mercan_context_params, const mercan_generation_params_v1 *);
+// 0 = completed (STOP or LIMIT), 1 = cancelled, -1 = error (mercan_last_error).
+// A null callback discards output. Cancellation is cooperative between decode
+// batches/tokens; it does not interrupt an in-flight device operation.
+MERCAN_API int mercan_generation_run_v1(mercan_generation *, mercan_generation_callback_v1, void *);
+MERCAN_API void mercan_generation_cancel_v1(mercan_generation *);
+MERCAN_API int mercan_generation_finish_reason_v1(const mercan_generation *);
+MERCAN_API void mercan_generation_free_v1(mercan_generation *);
+
 #ifdef __cplusplus
 }
 #endif

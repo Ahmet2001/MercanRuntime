@@ -36,6 +36,9 @@ static void set_error(const std::string & s) {
     g_last_error = s;
 }
 
+// Internal bridge so generation entry points use the same thread-local error.
+void mercan_generation_set_error(const std::string & s) { set_error(s); }
+
 static void mercan_llama_log(enum ggml_log_level level, const char * text, void *) {
     const char * verbose = std::getenv("MERCAN_VERBOSE");
     const bool show_all = verbose && *verbose && std::strcmp(verbose, "0") != 0;
@@ -47,7 +50,7 @@ static void mercan_llama_log(enum ggml_log_level level, const char * text, void 
 extern "C" {
 
 const char * mercan_version(void) {
-    return "0.1.2";
+    return "0.2.0";
 }
 
 uint32_t mercan_abi_version(void) {

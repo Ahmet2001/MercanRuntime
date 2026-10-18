@@ -175,8 +175,9 @@ sizes before calling functions that pass or return structs by value. ABI 1
 parameter layouts are frozen; incompatible additions require new entry points.
 Keep model/context handles alive for their dependents, and free all models
 and contexts before freeing the process-wide backend. Concurrent use of one
-context must be serialized by its owner. The C API currently exposes low-level
-decode/logits operations; CLI and language SDKs implement generation on top.
+context must be serialized by its owner. The CLI and EthosoftLib 0.6.0 use the
+same native generation/chat engine, including sampling, stop handling and
+cooperative cancellation. See [Generation API v1](docs/GENERATION_API_V1.md).
 
 
 | Surface | Header | What it provides | Docs |
