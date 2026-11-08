@@ -22,3 +22,5 @@ std::string mercan_metadata_string(const mercan_metadata_v1 * metadata, const ch
 void mercan_ensure_builtin_plugins(void);
 void mercan_register_nedolm_architecture(void);
 void mercan_register_ndsurf004_tokenizer(void);
+void mercan_register_lfm3_architecture(void);
+void mercan_register_gguf_vocab_tokenizer(void);

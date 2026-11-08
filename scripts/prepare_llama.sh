@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LLAMA_COMMIT="${MERCAN_LLAMA_COMMIT:-e71b80510c848c00175924ecf3c40333ccae8eb5}"
+LLAMA_COMMIT="${MERCAN_LLAMA_COMMIT:-19cce6919992fdffd92e0ac152caaf1e2b8f254e}"
 LLAMA_DIR="${MERCAN_LLAMA_DIR:-$ROOT/build/_deps/llama-src}"
 
 mkdir -p "$(dirname "$LLAMA_DIR")"

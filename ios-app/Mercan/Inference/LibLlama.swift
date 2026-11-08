@@ -44,6 +44,10 @@ actor MercanRuntimeContext {
     private var samplingParams = mercan_sampler_default_params()
     private var temporaryInvalidBytes: [CChar] = []
     private var generatedStopTail = ""
+    /// The prompt itself opened a `<think>` block, so the model's output starts
+    /// inside it. The tag is re-emitted with the first piece so UI-side
+    /// ThinkTagStripper sees a complete <think>…</think> block.
+    private var pendingThinkOpen = false
 
     private var entropyWindow: [Float] = []
     private let entropyWindowSize = 10
@@ -153,6 +157,7 @@ actor MercanRuntimeContext {
         }
 
         resetStreamingState()
+        pendingThinkOpen = text.hasSuffix("<think>")
         try decode(tokens, startingAt: 0)
         cachedContextTokens = tokens
         nCur = Int32(tokens.count)
@@ -178,6 +183,7 @@ actor MercanRuntimeContext {
         }
 
         resetStreamingState()
+        pendingThinkOpen = text.hasSuffix("<think>")
         try decode(tokens, startingAt: commonPrefix)
         cachedContextTokens = tokens
         nCur = Int32(tokens.count)
@@ -224,6 +230,15 @@ actor MercanRuntimeContext {
     }
 
     func completion_loop() throws -> String {
+        let piece = try completionStep()
+        if pendingThinkOpen {
+            pendingThinkOpen = false
+            return "<think>" + piece
+        }
+        return piece
+    }
+
+    private func completionStep() throws -> String {
         guard nCur < nLen else {
             is_done = true
             return ""
@@ -273,7 +288,13 @@ actor MercanRuntimeContext {
         // Mercan SFT uses 32001 (<|im_end|>) as the normal assistant-message
         // terminator. EOS=2 remains the conversation/document boundary.
         // Stop on structural token IDs before converting them back to text.
-        if nextToken == eos || nextToken == 32001 || nextToken == 32000 {
+        // Those IDs are NedoLM-specific: in other vocabularies (e.g. LFM3)
+        // 32000/32001 are ordinary words, so other architectures use the
+        // vocabulary's own end-of-generation set instead.
+        let isStop = isNedoLM
+            ? (nextToken == eos || nextToken == 32001 || nextToken == 32000)
+            : (nextToken == eos || mercan_token_is_eog(model, nextToken))
+        if isStop {
             is_done = true
             let tail = String(cString: temporaryInvalidBytes + [0])
             temporaryInvalidBytes.removeAll(keepingCapacity: true)
@@ -315,6 +336,25 @@ actor MercanRuntimeContext {
         return piece
     }
 
+    /// NedoLM/Mercan models use Turkish ChatML roles and fixed structural IDs.
+    private var isNedoLM: Bool { architectureName == "nedolm" }
+
+    /// Upstream ChatML roles used by non-NedoLM architectures (LFM3).
+    private func upstreamChatRole(_ role: String) -> String {
+        switch role.lowercased() {
+        case "system", "sistem":
+            return "system"
+        case "user", "kullanici", "kullanıcı":
+            return "user"
+        case "assistant", "asistan":
+            return "assistant"
+        case "tool", "araç", "arac":
+            return "tool"
+        default:
+            return role
+        }
+    }
+
     private func canonicalChatRole(_ role: String) -> String {
         switch role.lowercased() {
         case "system", "sistem":
@@ -334,6 +374,22 @@ actor MercanRuntimeContext {
         messages: [(role: String, content: String)],
         enableThinking: Bool = false
     ) -> String {
+        guard isNedoLM else {
+            // LFM3 chat template: explicit BOS and English ChatML roles.
+            // `enableThinking` is ignored here (see below).
+            var result = "<|startoftext|>"
+            for message in messages {
+                let role = upstreamChatRole(message.role)
+                result += "<|im_start|>\(role)\n\(message.content)<|im_end|>\n"
+            }
+            // Always open the reasoning block. LFM3's "<think></think>"
+            // (reasoning off) mode answers, emits a stray </think> and then
+            // repeats the answer; verified identically on upstream llama.cpp.
+            // The reasoning is hidden by ThinkTagStripper (see completion_loop).
+            result += "<|im_start|>assistant\n<think>"
+            return result
+        }
+
         var result = ""
         for message in messages {
             let role = canonicalChatRole(message.role)

@@ -1,8 +1,8 @@
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index 221e14f7f..4b7344a38 100644
+index 97250c2e8..225ed8d9d 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -60,6 +60,15 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+@@ -71,6 +71,15 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
  
  target_link_libraries(llama PUBLIC ggml)
  
@@ -19,19 +19,19 @@ index 221e14f7f..4b7344a38 100644
      set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
      target_compile_definitions(llama PRIVATE LLAMA_BUILD)
 diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
-index 15f651919..b9361a3a8 100644
+index 497e42692..8b8140bae 100644
 --- a/src/llama-arch.cpp
 +++ b/src/llama-arch.cpp
-@@ -31,6 +31,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+@@ -32,6 +32,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
      { LLM_ARCH_STABLELM,         "stablelm"         },
      { LLM_ARCH_QWEN,             "qwen"             },
      { LLM_ARCH_QWEN2,            "qwen2"            },
 +    { LLM_ARCH_NEDOLM,           "nedolm"           },
      { LLM_ARCH_QWEN2MOE,         "qwen2moe"         },
      { LLM_ARCH_QWEN2VL,          "qwen2vl"          },
-     { LLM_ARCH_QWEN3,            "qwen3"            },
+     { LLM_ARCH_SENSENOVA_U1,     "sensenova_u1"     },
 diff --git a/src/llama-arch.h b/src/llama-arch.h
-index f1d173a57..9d1f59602 100644
+index eca6d18af..6185ad4a1 100644
 --- a/src/llama-arch.h
 +++ b/src/llama-arch.h
 @@ -36,6 +36,7 @@ enum llm_arch {
@@ -41,12 +41,12 @@ index f1d173a57..9d1f59602 100644
 +    LLM_ARCH_NEDOLM,
      LLM_ARCH_QWEN2MOE,
      LLM_ARCH_QWEN2VL,
-     LLM_ARCH_QWEN3,
+     LLM_ARCH_SENSENOVA_U1,
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index ffedf89e6..98688b2e2 100644
+index c7b2fcc93..4a9826877 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -96,6 +96,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
+@@ -98,6 +98,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
              return new llama_model_qwen(params);
          case LLM_ARCH_QWEN2:
              return new llama_model_qwen2(params);
@@ -55,7 +55,7 @@ index ffedf89e6..98688b2e2 100644
          case LLM_ARCH_DREAM:
              return new llama_model_dream(params);
          case LLM_ARCH_LLADA:
-@@ -2947,6 +2949,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
+@@ -3595,6 +3597,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
          case LLM_ARCH_BITNET:
          case LLM_ARCH_QWEN:
          case LLM_ARCH_QWEN2:
@@ -64,7 +64,7 @@ index ffedf89e6..98688b2e2 100644
          case LLM_ARCH_QWEN2MOE:
          case LLM_ARCH_QWEN3:
 diff --git a/src/llama-vocab.cpp b/src/llama-vocab.cpp
-index a69801f08..a5b3b7422 100644
+index 65b569762..85d917afc 100644
 --- a/src/llama-vocab.cpp
 +++ b/src/llama-vocab.cpp
 @@ -1,5 +1,11 @@
@@ -79,15 +79,15 @@ index a69801f08..a5b3b7422 100644
  #include "ggml.h"
  #include "gguf.h"
  #include "llama-impl.h"
-@@ -1829,6 +1835,7 @@ struct llama_vocab::impl {
+@@ -2129,6 +2135,7 @@ struct llama_vocab::impl {
      bool remove_extra_whitespaces   = false;
      bool escape_whitespaces         = true;
      bool treat_whitespace_as_suffix = false;
 +    bool nedolm_exact_tokenizer       = false;
  
-     // BertNormalizer options
+     // Tokenizer normalizer options
      llama_vocab::normalizer_options normalizer_opts;
-@@ -1932,6 +1939,10 @@ private:
+@@ -2234,6 +2241,10 @@ private:
  void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
      struct gguf_context * ctx = ml.metadata;
  
@@ -98,7 +98,7 @@ index a69801f08..a5b3b7422 100644
      // determine vocab type
      {
          ml.get_key(LLM_KV_TOKENIZER_MODEL, tokenizer_model);
-@@ -2071,15 +2082,61 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
+@@ -2374,15 +2385,61 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
                  }
  #endif
              }
@@ -164,10 +164,10 @@ index a69801f08..a5b3b7422 100644
 +                special_sep_id = LLAMA_TOKEN_NULL;
 +                special_pad_id = LLAMA_TOKEN_NULL;
 +            }
-         } else if (tokenizer_model == "plamo2") {
-             type = LLAMA_VOCAB_TYPE_PLAMO2;
+         } else if (tokenizer_model == "test") {
+             type = LLAMA_VOCAB_TYPE_TEST;
  
-@@ -3552,6 +3609,35 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
+@@ -3969,6 +4026,35 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
              } break;
          case LLAMA_VOCAB_TYPE_RWKV:
              {
@@ -203,7 +203,7 @@ index a69801f08..a5b3b7422 100644
                  llm_tokenizer_rwkv_session session(vocab, *static_cast<const llm_tokenizer_rwkv *>(tokenizer.get()));
                  for (const auto & fragment : fragment_buffer) {
                      if (fragment.type == FRAGMENT_BUFFER_VARIANT_TYPE_RAW_TEXT) {
-@@ -3562,7 +3648,7 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
+@@ -3979,7 +4065,7 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
  #endif
  
                          session.tokenize(text, output);
@@ -213,10 +213,10 @@ index a69801f08..a5b3b7422 100644
                      }
                  }
 diff --git a/src/models/models.h b/src/models/models.h
-index 87195fddd..ad41a06f9 100644
+index 5cd69b59f..2c995eb47 100644
 --- a/src/models/models.h
 +++ b/src/models/models.h
-@@ -491,6 +491,23 @@ struct llama_model_qwen2 : public llama_model_base {
+@@ -535,6 +535,23 @@ struct llama_model_qwen2 : public llama_model_base {
      std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
  };
  

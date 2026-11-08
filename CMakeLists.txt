@@ -34,6 +34,8 @@ set(MERCAN_RUNTIME_SOURCES
     core/builtin_plugins.cpp
     architectures/nedolm/architecture.cpp
     architectures/nedolm/tokenizer.cpp
+    architectures/lfm3/architecture.cpp
+    architectures/gguf_vocab/tokenizer.cpp
 )
 
 if(MERCAN_BUILD_SHARED)

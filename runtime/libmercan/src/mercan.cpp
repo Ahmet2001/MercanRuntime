@@ -546,6 +546,14 @@ mercan_token mercan_eos_token(mercan_model * model) {
     return vocab ? llama_vocab_eos(vocab) : -1;
 }
 
+bool mercan_token_is_eog(mercan_model * model, mercan_token token) {
+    if (!model || token < 0) return false;
+    if (model->generic) return token == mercan_generic_eos_token(model->generic);
+    if (!model->impl) return false;
+    const llama_vocab * vocab = llama_model_get_vocab(model->impl);
+    return vocab ? llama_vocab_is_eog(vocab, static_cast<llama_token>(token)) : false;
+}
+
 mercan_token mercan_pad_token(mercan_model * model) {
     if (!model) return -1;
     if (model->generic) return mercan_generic_pad_token(model->generic);

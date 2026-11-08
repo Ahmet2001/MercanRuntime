@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -27,6 +28,46 @@ static constexpr const char * VERSION = "0.1.2";
 // <|im_end|>, while the training roles are Turkish: kullanici / asistan.
 static constexpr mercan_token NEDOLM_MESSAGE_START_TOKEN = 32000;
 static constexpr mercan_token NEDOLM_MESSAGE_END_TOKEN = 32001;
+
+// Chat formatting is architecture-specific. NedoLM/Mercan uses Turkish ChatML
+// roles and its own structural IDs; other architectures (e.g. LFM3) use the
+// upstream ChatML roles, an explicit BOS and the vocabulary's EOG set.
+struct chat_format {
+    bool nedolm = true;
+    bool parse_special = false;
+    std::string bos;
+    std::string user_role = "kullanici";
+    std::string assistant_role = "asistan";
+    std::string generation_suffix; // appended after the assistant header
+    bool strip_reasoning = false;  // output starts inside <think>; keep text after </think>
+
+    std::string render(const std::vector<std::pair<std::string, std::string>> & turns) const {
+        std::string out = bos;
+        for (const auto & t : turns) {
+            out += "<|im_start|>" + t.first + "\n" + t.second + "<|im_end|>\n";
+        }
+        out += "<|im_start|>" + assistant_role + "\n" + generation_suffix;
+        return out;
+    }
+};
+
+static chat_format chat_format_for(mercan_model * model) {
+    chat_format fmt;
+    const char * arch = mercan_model_architecture(model);
+    if (arch && std::string(arch) == "lfm3") {
+        fmt.nedolm = false;
+        fmt.parse_special = true;
+        fmt.bos = "<|startoftext|>";
+        fmt.user_role = "user";
+        fmt.assistant_role = "assistant";
+        // LFM3's reasoning-off form ("<think></think>") answers, emits a stray
+        // </think> and repeats the answer (same on upstream llama.cpp), so the
+        // reasoning block is always opened and stripped from the printed answer.
+        fmt.generation_suffix = "<think>";
+        fmt.strip_reasoning = true;
+    }
+    return fmt;
+}
 
 static void die(const std::string & message) {
     std::cerr << "mercan: " << message << "\n";
@@ -120,15 +161,15 @@ static fs::path resolve_model(const std::string & input) {
     return pull_hf(parse_hf_spec(input));
 }
 
-static std::vector<mercan_token> tokenize(mercan_model * model, const std::string & text) {
-    int32_t n = mercan_tokenize(model, text.data(), text.size(), false, false, nullptr, 0);
+static std::vector<mercan_token> tokenize(mercan_model * model, const std::string & text, bool parse_special) {
+    int32_t n = mercan_tokenize(model, text.data(), text.size(), false, parse_special, nullptr, 0);
     if (n == 0 && !text.empty()) die(std::string("tokenization failed: ") + mercan_last_error());
     if (n < 0) n = -n;
     std::vector<mercan_token> tokens(static_cast<size_t>(std::max(1, n)));
-    int32_t got = mercan_tokenize(model, text.data(), text.size(), false, false, tokens.data(), static_cast<int32_t>(tokens.size()));
+    int32_t got = mercan_tokenize(model, text.data(), text.size(), false, parse_special, tokens.data(), static_cast<int32_t>(tokens.size()));
     if (got < 0) {
         tokens.resize(static_cast<size_t>(-got));
-        got = mercan_tokenize(model, text.data(), text.size(), false, false, tokens.data(), static_cast<int32_t>(tokens.size()));
+        got = mercan_tokenize(model, text.data(), text.size(), false, parse_special, tokens.data(), static_cast<int32_t>(tokens.size()));
     }
     if (got < 0) die("token buffer sizing failed");
     tokens.resize(static_cast<size_t>(got));
@@ -166,13 +207,14 @@ struct run_options {
 #endif
 };
 
-static std::string generate(mercan_model * model, const run_options & opt, const std::string & formatted_prompt) {
+static std::string generate(mercan_model * model, const run_options & opt, const chat_format & fmt,
+                            const std::string & formatted_prompt) {
     mercan_context_params cp = mercan_context_default_params();
     if (opt.threads > 0) cp.n_threads = cp.n_threads_batch = opt.threads;
     mercan_context * ctx = mercan_context_create(model, cp);
     if (!ctx) die(std::string("context creation failed: ") + mercan_last_error());
 
-    auto prompt_tokens = tokenize(model, formatted_prompt);
+    auto prompt_tokens = tokenize(model, formatted_prompt, fmt.parse_special);
     if (prompt_tokens.empty()) {
         mercan_context_free(ctx);
         die("prompt produced no tokens");
@@ -209,9 +251,13 @@ static std::string generate(mercan_model * model, const run_options & opt, const
 
         // Stop structural chat tokens before they are converted to text or fed
         // back into the decoder. This prevents <|im_end|>/<|im_start|> leakage.
-        if (next == eos ||
-            next == NEDOLM_MESSAGE_END_TOKEN ||
-            next == NEDOLM_MESSAGE_START_TOKEN) {
+        if (fmt.nedolm) {
+            if (next == eos ||
+                next == NEDOLM_MESSAGE_END_TOKEN ||
+                next == NEDOLM_MESSAGE_START_TOKEN) {
+                break;
+            }
+        } else if (next == eos || mercan_token_is_eog(model, next)) {
             break;
         }
 
@@ -232,6 +278,18 @@ static std::string generate(mercan_model * model, const run_options & opt, const
     }
 
     mercan_context_free(ctx);
+
+    if (fmt.strip_reasoning) {
+        const auto close = text.find("</think>");
+        if (close == std::string::npos) {
+            std::cerr << "mercan: reasoning did not finish within " << opt.max_tokens
+                      << " tokens; raise --max-tokens\n";
+            return {};
+        }
+        text.erase(0, close + std::strlen("</think>"));
+        const auto first = text.find_first_not_of(" \t\r\n");
+        text.erase(0, first == std::string::npos ? text.size() : first);
+    }
     return text;
 }
 
@@ -332,22 +390,23 @@ static int command_run(int argc, char ** argv) {
     mercan_model * model = mercan_model_load(model_path.string().c_str(), mp);
     if (!model) die(std::string("model load failed: ") + mercan_last_error());
 
+    const chat_format fmt = chat_format_for(model);
+    std::vector<std::pair<std::string, std::string>> turns;
     if (!opt.prompt.empty()) {
-        const std::string formatted = "<|im_start|>kullanici\n" + opt.prompt + "<|im_end|>\n<|im_start|>asistan\n";
-        std::cout << generate(model, opt, formatted) << "\n";
+        turns.emplace_back(fmt.user_role, opt.prompt);
+        std::cout << generate(model, opt, fmt, fmt.render(turns)) << "\n";
     } else {
         std::cout << "Mercan ready. Type /exit to quit.\n\n";
         std::string line;
-        std::string transcript;
         while (true) {
             std::cout << "> " << std::flush;
             if (!std::getline(std::cin, line)) break;
             if (line == "/exit" || line == "/quit") break;
             if (line.empty()) continue;
-            transcript += "<|im_start|>kullanici\n" + line + "<|im_end|>\n<|im_start|>asistan\n";
-            const std::string answer = generate(model, opt, transcript);
+            turns.emplace_back(fmt.user_role, line);
+            const std::string answer = generate(model, opt, fmt, fmt.render(turns));
             std::cout << answer << "\n\n";
-            transcript += answer + "<|im_end|>\n";
+            turns.emplace_back(fmt.assistant_role, answer);
         }
     }
 

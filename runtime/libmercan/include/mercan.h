@@ -101,6 +101,11 @@ MERCAN_API mercan_token mercan_bos_token(mercan_model * model);
 MERCAN_API mercan_token mercan_eos_token(mercan_model * model);
 MERCAN_API mercan_token mercan_pad_token(mercan_model * model);
 
+// True when the model's vocabulary marks `token` as end-of-generation
+// (EOS, EOT, <|im_end|>-style turn terminators, ...). Prefer this over
+// hard-coded token IDs, which differ between architectures.
+MERCAN_API bool mercan_token_is_eog(mercan_model * model, mercan_token token);
+
 // Returns bytes written, or negative required capacity.
 MERCAN_API int32_t mercan_token_to_piece(
     mercan_model * model,

@@ -8,7 +8,7 @@ CARRIER="$WORK/silo-carrier"
 LLAMA="$WORK/llama.cpp"
 MERCAN_XC="$APP_DIR/MercanRuntime.xcframework"
 SILO_COMMIT="1be4fa9aad0ec72dbb6f40ac07d537ea16648944"
-LLAMA_COMMIT="e71b80510c848c00175924ecf3c40333ccae8eb5"
+LLAMA_COMMIT="19cce6919992fdffd92e0ac152caaf1e2b8f254e"
 
 for f in \
   runtime/nedolm/nedolm-llama.patch \
@@ -25,7 +25,9 @@ for f in \
   core/model_loader.cpp \
   core/builtin_plugins.cpp \
   architectures/nedolm/architecture.cpp \
-  architectures/nedolm/tokenizer.cpp; do
+  architectures/nedolm/tokenizer.cpp \
+  architectures/lfm3/architecture.cpp \
+  architectures/gguf_vocab/tokenizer.cpp; do
   test -s "$ROOT/$f" || { echo "Missing required file: $f" >&2; exit 2; }
 done
 

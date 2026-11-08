@@ -71,6 +71,20 @@ NDSRF004 special tokens are:
 - BOS = 1
 - EOS = 2
 
+## LFM3 v1 profile
+
+LiquidAI LFM3 models (hybrid gated short-conv + sliding-window/global attention) use:
+
+- `general.architecture = "lfm3"`
+- Architecture SDK provider: `lfm3` (backend-managed graph: llama.cpp's own `lfm3` model class)
+- Tokenizer provider: `gguf-vocab`
+
+The `gguf-vocab` tokenizer is the standard `tokenizer.ggml.*` vocabulary data in the container, encoded/decoded by the backend's tokenizer. It contains no executable code. Architecture metadata keeps the upstream `lfm3.*` namespace unchanged.
+
+Because the physical container is GGUF v3, an upstream LFM3 GGUF becomes a `.mercan` file by adding the core Mercan keys without touching tensors (`scripts/gguf_to_mercan.py`). The wrapper also records `mercan.source_kind = "gguf"`, `mercan.source_checkpoint` and `mercan.source_sha256`.
+
+Chat format: `<|startoftext|>` BOS, ChatML with English roles (`system` / `user` / `assistant`), generation prompt `<|im_start|>assistant\n<think>`. End of generation is the vocabulary's EOG set (`<|im_end|>`, `<|endoftext|>`); NedoLM's fixed IDs 32000/32001 are ordinary tokens in this vocabulary and must not be used as stops.
+
 ## NedoLM architecture metadata
 
 - `nedolm.vocab_size`
