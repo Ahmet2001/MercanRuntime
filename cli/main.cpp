@@ -20,6 +20,10 @@
 #include <utility>
 #include <vector>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 
 static constexpr const char * VERSION = "0.1.2";
@@ -40,6 +44,7 @@ struct chat_format {
     std::string assistant_role = "asistan";
     std::string generation_suffix; // appended after the assistant header
     bool strip_reasoning = false;  // output starts inside <think>; keep text after </think>
+    bool stop_at_think_close = false; // reasoning-off mode: a </think> ends the answer
 
     std::string render(const std::vector<std::pair<std::string, std::string>> & turns) const {
         std::string out = bos;
@@ -199,6 +204,8 @@ struct run_options {
     float repeat_penalty = 1.10f;
     int repeat_last_n = 64;
     int threads = 0;
+    bool show_thinking = false; // stream the model's <think> reasoning (reasoning models only)
+    bool no_thinking = false;   // reasoning-off mode (faster, less accurate)
     std::vector<std::string> plugins;
 #ifdef MERCAN_CUDA_BUILD
     int gpu_layers = -1;
@@ -241,6 +248,49 @@ static std::string generate(mercan_model * model, const run_options & opt, const
     sampler.repeat_penalty = opt.repeat_penalty;
     sampler.repeat_last_n = opt.repeat_last_n;
 
+    // --show-thinking: stream the reasoning (dimmed on a terminal) and then the
+    // answer as they are generated. The returned value is still the answer only.
+    const bool stream = opt.show_thinking && fmt.strip_reasoning;
+#ifdef _WIN32
+    const bool tty = false;
+#else
+    const bool tty = isatty(STDOUT_FILENO) != 0;
+#endif
+    const char * dim_on = tty ? "\033[2m" : "";
+    const char * dim_off = tty ? "\033[0m" : "";
+    static const std::string think_close = "</think>";
+    size_t shown = 0;
+    bool reasoning_closed = false;
+    bool answer_started = false;
+    auto stream_out = [&](bool final_flush) {
+        if (!reasoning_closed) {
+            const auto close = text.find(think_close, shown);
+            if (close != std::string::npos) {
+                std::cout << text.substr(shown, close - shown) << dim_off << "\n\n";
+                shown = close + think_close.size();
+                reasoning_closed = true;
+            } else {
+                // hold back a possible partial "</think>" until the next piece
+                const size_t hold = final_flush ? 0 : think_close.size() - 1;
+                if (text.size() > shown + hold) {
+                    std::cout << text.substr(shown, text.size() - hold - shown);
+                    shown = text.size() - hold;
+                }
+                std::cout << std::flush;
+                return;
+            }
+        }
+        if (!answer_started) {
+            const auto first = text.find_first_not_of(" \t\r\n", shown);
+            if (first == std::string::npos) { shown = text.size(); std::cout << std::flush; return; }
+            shown = first;
+            answer_started = true;
+        }
+        std::cout << text.substr(shown) << std::flush;
+        shown = text.size();
+    };
+    if (stream) std::cout << dim_on << std::flush;
+
     for (int i = 0; i < opt.max_tokens; ++i) {
         mercan_token next = mercan_sample_next(ctx, sampler);
         if (next < 0) {
@@ -264,6 +314,17 @@ static std::string generate(mercan_model * model, const run_options & opt, const
         const std::string piece = token_piece(model, next);
         text += piece;
 
+        // Reasoning-off LFM3 tends to answer, emit a stray </think> and then
+        // repeat the answer; the text before </think> is the answer.
+        if (fmt.stop_at_think_close) {
+            const auto close = text.find("</think>");
+            if (close != std::string::npos) {
+                text.resize(close);
+                break;
+            }
+        }
+        if (stream) stream_out(false);
+
         // Compatibility fallback for artifacts/tokenizers that surface a
         // textual alias as ordinary pieces instead of the structural ID.
         const auto end_stop = text.find("<|im_end|>");
@@ -278,6 +339,12 @@ static std::string generate(mercan_model * model, const run_options & opt, const
     }
 
     mercan_context_free(ctx);
+
+    if (stream) {
+        stream_out(true);
+        if (!reasoning_closed) std::cout << dim_off;
+        std::cout << std::flush;
+    }
 
     if (fmt.strip_reasoning) {
         const auto close = text.find("</think>");
@@ -317,6 +384,8 @@ static void print_help() {
         << "  --repeat-penalty F      repetition penalty (default 1.10)\n"
         << "  --repeat-last-n N       repetition window (default 64)\n"
         << "  -t, --threads N         CPU threads\n"
+        << "  --show-thinking         stream the model's <think> reasoning (reasoning models, e.g. LFM3)\n"
+        << "  --no-thinking           answer without reasoning (faster, less accurate; LFM3)\n"
         << "  --plugin PATH           load external architecture/tokenizer plugin\n"
         << "  --gpu-layers N          GPU layers (-1 = all; CUDA build defaults to -1)\n\n"
         << "Examples:\n"
@@ -365,6 +434,8 @@ static int command_run(int argc, char ** argv) {
         else if (a == "--repeat-penalty") opt.repeat_penalty = std::stof(need(a.c_str()));
         else if (a == "--repeat-last-n") opt.repeat_last_n = std::stoi(need(a.c_str()));
         else if (a == "-t" || a == "--threads") opt.threads = std::stoi(need(a.c_str()));
+        else if (a == "--show-thinking") opt.show_thinking = true;
+        else if (a == "--no-thinking") opt.no_thinking = true;
         else if (a == "--plugin") opt.plugins.push_back(need(a.c_str()));
         else if (a == "--gpu-layers") opt.gpu_layers = std::stoi(need(a.c_str()));
         else if (a == "-h" || a == "--help") { print_help(); return 0; }
@@ -390,11 +461,18 @@ static int command_run(int argc, char ** argv) {
     mercan_model * model = mercan_model_load(model_path.string().c_str(), mp);
     if (!model) die(std::string("model load failed: ") + mercan_last_error());
 
-    const chat_format fmt = chat_format_for(model);
+    chat_format fmt = chat_format_for(model);
+    if (opt.no_thinking && fmt.strip_reasoning) {
+        fmt.generation_suffix = "<think></think>";
+        fmt.strip_reasoning = false;
+        fmt.stop_at_think_close = true;
+    }
     std::vector<std::pair<std::string, std::string>> turns;
+    const bool streamed = opt.show_thinking && fmt.strip_reasoning; // generate() already printed it
     if (!opt.prompt.empty()) {
         turns.emplace_back(fmt.user_role, opt.prompt);
-        std::cout << generate(model, opt, fmt, fmt.render(turns)) << "\n";
+        const std::string answer = generate(model, opt, fmt, fmt.render(turns));
+        std::cout << (streamed ? "" : answer) << "\n";
     } else {
         std::cout << "Mercan ready. Type /exit to quit.\n\n";
         std::string line;
@@ -405,7 +483,7 @@ static int command_run(int argc, char ** argv) {
             if (line.empty()) continue;
             turns.emplace_back(fmt.user_role, line);
             const std::string answer = generate(model, opt, fmt, fmt.render(turns));
-            std::cout << answer << "\n\n";
+            std::cout << (streamed ? "" : answer) << "\n\n";
             turns.emplace_back(fmt.assistant_role, answer);
         }
     }
