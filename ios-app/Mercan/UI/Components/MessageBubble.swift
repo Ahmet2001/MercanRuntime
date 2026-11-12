@@ -26,9 +26,16 @@ struct MessageBubble: View {
                             )
                         )
                 } else {
-                    MarkdownText(text: message.displayContent, isStreaming: false)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !message.reasoningContent.isEmpty {
+                            ReasoningDisclosure(reasoning: message.reasoningContent)
+                        }
+                        if !message.displayContent.isEmpty {
+                            MarkdownText(text: message.displayContent, isStreaming: false)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 if !message.isUser { Spacer(minLength: 8) }
@@ -63,12 +70,56 @@ struct StreamingBubble: View {
     let content: String
 
     var body: some View {
+        let parsed = ReasoningOutput.parse(content)
         HStack(alignment: .top, spacing: 8) {
             MercanMark(size: 20)
-            Text(content.isEmpty ? " " : content)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 8) {
+                if !parsed.reasoning.isEmpty {
+                    ReasoningDisclosure(
+                        reasoning: parsed.reasoning,
+                        initiallyExpanded: true,
+                        inProgress: parsed.isInsideReasoning
+                    )
+                }
+                if !parsed.answer.isEmpty {
+                    Text(parsed.answer)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// User-controlled disclosure for the model's generated thinking text.
+/// The live stream opens by default; saved responses stay collapsed.
+struct ReasoningDisclosure: View {
+    let reasoning: String
+    let inProgress: Bool
+    @State private var isExpanded: Bool
+
+    init(reasoning: String, initiallyExpanded: Bool = false, inProgress: Bool = false) {
+        self.reasoning = reasoning
+        self.inProgress = inProgress
+        _isExpanded = State(initialValue: initiallyExpanded)
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            Text(reasoning)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+        } label: {
+            Label(inProgress ? "Reasoning…" : "Reasoning", systemImage: "brain.head.profile")
+                .font(.subheadline.weight(.medium))
+        }
+        .padding(12)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 
