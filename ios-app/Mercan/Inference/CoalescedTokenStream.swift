@@ -27,7 +27,7 @@ final class LiveTokenStreamModel: ObservableObject {
 /// - update SwiftUI at most about every 50 ms (or on a useful text boundary);
 /// - hide canonical tool-call JSON until it is classified, so internal tool
 ///   plumbing never flashes in the chat UI;
-/// - strip special/control and hidden <think> content before presentation.
+/// - strip control tokens but keep <think> blocks for the expandable reasoning UI.
 actor LiveTokenCoalescer {
     static let shared = LiveTokenCoalescer()
 
@@ -44,7 +44,6 @@ actor LiveTokenCoalescer {
     private var flushTask: Task<Void, Never>?
 
     private var tokenFilter = SpecialTokenFilter()
-    private var thinkStripper = ThinkTagStripper()
 
     func beginGeneration() async {
         generationID += 1
@@ -56,7 +55,6 @@ actor LiveTokenCoalescer {
         isVisibleAnswer = false
         isHiddenToolCall = false
         tokenFilter.reset()
-        thinkStripper.reset()
         await MainActor.run {
             LiveTokenStreamModel.shared.clear()
         }
@@ -137,9 +135,8 @@ actor LiveTokenCoalescer {
         }
 
         let filterTail = tokenFilter.flush()
-        let strippedTail = thinkStripper.process(filterTail) + thinkStripper.flush()
-        if !strippedTail.isEmpty {
-            visibleText += strippedTail
+        if !filterTail.isEmpty {
+            visibleText += filterTail
         }
         await flushNow()
     }
@@ -154,17 +151,13 @@ actor LiveTokenCoalescer {
         isVisibleAnswer = false
         isHiddenToolCall = false
         tokenFilter.reset()
-        thinkStripper.reset()
         await MainActor.run {
             LiveTokenStreamModel.shared.clear()
         }
     }
 
     private func appendVisibleRaw(_ raw: String, scheduleOnly: Bool = false) async {
-        let filtered = tokenFilter.process(raw)
-        guard !filtered.isEmpty else { return }
-
-        let display = thinkStripper.process(filtered)
+        let display = tokenFilter.process(raw)
         guard !display.isEmpty else { return }
 
         visibleText += display
