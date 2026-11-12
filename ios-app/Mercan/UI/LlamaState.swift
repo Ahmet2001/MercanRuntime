@@ -31,20 +31,54 @@ struct ChatMessage: Identifiable, Codable {
         isUser && content.hasPrefix(Self.videoTranscriptAttachmentPrefix)
     }
 
+    var reasoningContent: String {
+        isUser ? "" : ReasoningOutput.parse(content).reasoning
+    }
+
     var displayContent: String {
-        guard !isUser else { return content }
-        // Strip <think>...</think> blocks for display
-        var result = content
-        while let startRange = result.range(of: "<think>") {
-            if let endRange = result.range(of: "</think>", range: startRange.upperBound..<result.endIndex) {
-                result.removeSubrange(startRange.lowerBound..<endRange.upperBound)
+        isUser ? content : ReasoningOutput.parse(content).answer
+    }
+}
+
+/// Separates LFM's streamed <think> blocks from the user-facing answer.
+/// Also tolerates incomplete blocks during streaming and stray closing tags in
+/// models that do not consistently honor the no-thinking prompt.
+struct ReasoningOutput {
+    let reasoning: String
+    let answer: String
+    let isInsideReasoning: Bool
+
+    static func parse(_ raw: String) -> ReasoningOutput {
+        var remaining = raw[...]
+        var answerParts: [String] = []
+        var reasoningParts: [String] = []
+        var isInsideReasoning = false
+
+        while let open = remaining.range(of: "<think>") {
+            answerParts.append(String(remaining[..<open.lowerBound]))
+            let inside = remaining[open.upperBound...]
+            if let close = inside.range(of: "</think>") {
+                reasoningParts.append(String(inside[..<close.lowerBound]))
+                remaining = inside[close.upperBound...]
             } else {
-                // Unclosed think block — remove from <think> to end
-                result.removeSubrange(startRange.lowerBound..<result.endIndex)
+                reasoningParts.append(String(inside))
+                remaining = remaining[remaining.endIndex...]
+                isInsideReasoning = true
+                break
             }
         }
-        // Trim leading whitespace/newlines left after stripping
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        answerParts.append(String(remaining))
+        let answer = answerParts.joined()
+            .replacingOccurrences(of: "</think>", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return ReasoningOutput(
+            reasoning: reasoningParts.joined(separator: "\n\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            answer: answer,
+            isInsideReasoning: isInsideReasoning
+        )
     }
 }
 
@@ -281,6 +315,10 @@ class LlamaState: ObservableObject {
     @Published var systemPrompt: String {
         didSet { UserDefaults.standard.set(systemPrompt, forKey: "systemPrompt") }
     }
+    @Published var reasoningEnabled: Bool {
+        didSet { UserDefaults.standard.set(reasoningEnabled, forKey: "reasoningEnabled") }
+    }
+    @Published var modelSupportsReasoning = false
     @Published var webSearchEnabled: Bool {
         didSet { UserDefaults.standard.set(webSearchEnabled, forKey: "webSearchEnabled") }
     }
@@ -617,7 +655,10 @@ class LlamaState: ObservableObject {
                 }
             }
             await engine.setSampling(samplingConfiguration)
+            await engine.setReasoningEnabled(reasoningEnabled)
+            modelSupportsReasoning = await engine.supportsReasoningControl()
         } catch {
+            modelSupportsReasoning = false
             inferenceEngine = nil
             throw error
         }
@@ -672,6 +713,7 @@ class LlamaState: ObservableObject {
 
     init() {
         self.systemPrompt = UserDefaults.standard.string(forKey: "systemPrompt") ?? ""
+        self.reasoningEnabled = UserDefaults.standard.bool(forKey: "reasoningEnabled")
         self.webSearchEnabled = UserDefaults.standard.object(forKey: "webSearchEnabled") == nil
             ? true
             : UserDefaults.standard.bool(forKey: "webSearchEnabled")
@@ -928,6 +970,7 @@ class LlamaState: ObservableObject {
 
         await inferenceEngine?.deinitialize()
         inferenceEngine = nil
+        modelSupportsReasoning = false
 
         do {
             try await initializeEngine(at: modelUrl)
@@ -1091,7 +1134,8 @@ class LlamaState: ObservableObject {
         let latestQuery = messages.last(where: { $0.isUser })?.content ?? ""
         appendDocumentContext(to: &chatMessages, query: latestQuery)
         for msg in messages {
-            chatMessages.append((role: msg.isUser ? "user" : "assistant", content: msg.content))
+            chatMessages.append((role: msg.isUser ? "user" : "assistant",
+                                 content: msg.isUser ? msg.content : msg.displayContent))
         }
         return chatMessages
     }
@@ -1169,6 +1213,7 @@ class LlamaState: ObservableObject {
         messages: [(role: String, content: String)]
     ) async throws {
         await inferenceEngine.setSampling(samplingConfiguration)
+        await inferenceEngine.setReasoningEnabled(reasoningEnabled)
         do {
             try await inferenceEngine.generateNext(messages: messages)
         } catch {
@@ -1200,10 +1245,8 @@ class LlamaState: ObservableObject {
 
     private func cleanedAssistantDisplay(_ raw: String) -> String {
         let filter = SpecialTokenFilter()
-        let stripper = ThinkTagStripper()
         let filtered = filter.process(raw) + filter.flush()
-        return (stripper.process(filtered) + stripper.flush())
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return ReasoningOutput.parse(filtered).answer
     }
 
     private func toolAwareAssistantResponse(
@@ -1311,6 +1354,7 @@ class LlamaState: ObservableObject {
         }
 
         guard let inferenceEngine else { return }
+        await inferenceEngine.setReasoningEnabled(reasoningEnabled)
 
         speechSynthesizer.stop()
         isGenerating = true
@@ -1346,7 +1390,8 @@ class LlamaState: ObservableObject {
             await appendTranscriptContext(to: &chatMessages)
             appendDocumentContext(to: &chatMessages, query: text)
             for msg in messages {
-                chatMessages.append((role: msg.isUser ? "user" : "assistant", content: msg.content))
+                chatMessages.append((role: msg.isUser ? "user" : "assistant",
+                                     content: msg.isUser ? msg.content : msg.displayContent))
             }
 
             // Context overflow handling
