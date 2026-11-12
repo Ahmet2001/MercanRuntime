@@ -127,7 +127,7 @@ extension LlamaState {
         for message in messages {
             inferenceMessages.append((
                 role: message.isUser ? "user" : "assistant",
-                content: message.content
+                content: message.isUser ? message.content : message.displayContent
             ))
         }
 
@@ -163,6 +163,7 @@ extension LlamaState {
                 repeatPenalty: Float(repeatPenalty),
                 repeatLastN: 64
             ))
+            await webEngine.setReasoningEnabled(reasoningEnabled)
 
             // Reserve real generation room instead of filling almost the whole
             // context with search evidence. 4K contexts keep ~1K tokens free;
@@ -314,10 +315,8 @@ extension LlamaState {
                 }
 
                 let filter = SpecialTokenFilter()
-                let stripper = ThinkTagStripper()
                 let filtered = filter.process(candidateRaw) + filter.flush()
-                let display = (stripper.process(filtered) + stripper.flush())
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let display = ReasoningOutput.parse(filtered).answer
 
                 if display.isEmpty {
                     if !directFallbackUsed {
@@ -377,7 +376,9 @@ extension LlamaState {
             }
 
             if !ForcedWebSearchRuntimeState.shared.cancelled && !Task.isCancelled {
-                let saved = finalDisplay.isEmpty ? finalRaw : finalDisplay
+                // Preserve the accepted model trace for the expandable reasoning UI.
+                // Rejected tool calls / raw evidence still never enter history.
+                let saved = finalRaw.isEmpty ? finalDisplay : finalRaw
                 if !saved.isEmpty,
                    WebSearchService.parseToolCalls(from: saved) == nil {
                     // Only a human-readable final answer can enter chat history.
