@@ -213,6 +213,8 @@ struct ContentView: View {
                     InputComposer(
                         text: $inputText,
                         webSearchForNextPrompt: $webSearchForNextPrompt,
+                        reasoningEnabled: $llamaState.reasoningEnabled,
+                        reasoningSupported: llamaState.modelSupportsReasoning,
                         isGenerating: llamaState.isGenerating,
                         inputsDisabled: llamaState.isLoadingModel || isSearchingWeb,
                         onSend: { Task { await submitMessage() } },
