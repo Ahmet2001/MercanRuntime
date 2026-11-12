@@ -23,6 +23,8 @@ protocol InferenceEngine: Actor {
 
     func initialize(modelPath: String, contextSize: UInt32, onProgress: (@Sendable (Float) -> Void)?) async throws
     func setSampling(_ configuration: SamplingConfiguration) async
+    func setReasoningEnabled(_ enabled: Bool) async
+    func supportsReasoningControl() async -> Bool
     func generateNext(messages: [(role: String, content: String)]) async throws
     func encodePrompt(messages: [(role: String, content: String)]) async throws
     func streamToken() async throws -> String?
