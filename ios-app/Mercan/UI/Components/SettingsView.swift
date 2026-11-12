@@ -51,6 +51,17 @@ struct SettingsView: View {
                 }
 
                 Section("Generation") {
+                    Toggle(isOn: $llamaState.reasoningEnabled) {
+                        Label("Reasoning (LFM)", systemImage: "brain.head.profile")
+                    }
+                    .disabled(!llamaState.modelSupportsReasoning || llamaState.isGenerating)
+
+                    Text(llamaState.modelSupportsReasoning
+                         ? "When on, LFM generates a reasoning trace that you can expand in chat. When off, the app requests a direct answer. Some models may still think."
+                         : "Reasoning control is available when an LFM3 .mercan model is loaded.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
                     Picker("Preset", selection: Binding(
                         get: { llamaState.currentGenerationPreset },
                         set: { llamaState.applyGenerationPreset($0) }
