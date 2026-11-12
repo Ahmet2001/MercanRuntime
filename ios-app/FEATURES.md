@@ -13,6 +13,8 @@ The iOS app is a local-first Mercan client built on `libmercan`.
 - Device-aware context recommendation
 - Generation presets: Precise, Balanced and Creative
 - Advanced temperature, Top-P, Top-K, Min-P and repeat-penalty controls
+- LFM3 reasoning On/Off (composer shortcut and Settings; saved on device)
+- Expandable reasoning traces in saved chat replies and live streamed reasoning
 - Context usage meter
 - Last-generation tokens/second metrics
 - Local PDF/TXT/Markdown/JSON/CSV document grounding
@@ -21,6 +23,12 @@ The iOS app is a local-first Mercan client built on `libmercan`.
 - Local inference benchmark
 - Privacy explanation
 - User-friendly model error card
+
+## LFM reasoning
+
+Load a compatible LFM3 `.mercan` model, then tap the brain button next to the message field or enable **Reasoning (LFM)** in Settings > Generation. The setting is off by default and is preserved between launches. When enabled, Mercan starts the LFM assistant turn with `<think>`; when disabled, it uses the upstream closed-block `<think></think>` prompt. The model may not consistently obey the no-thinking request.
+
+If the model generates a reasoning block, it appears in a collapsible **Reasoning** section above the final answer. Reasoning can be expanded after the response and is expanded while a normal response is streaming. During web search, candidate responses are buffered to prevent tool-call JSON or raw evidence from appearing before validation. Previous turns' reasoning is not replayed into the next inference prompt.
 
 ## Document grounding
 
