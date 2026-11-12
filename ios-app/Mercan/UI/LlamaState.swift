@@ -69,9 +69,19 @@ struct ReasoningOutput {
         }
 
         answerParts.append(String(remaining))
-        let answer = answerParts.joined()
-            .replacingOccurrences(of: "</think>", with: "")
+        let combined = answerParts.joined()
+        let chunks = combined.components(separatedBy: "</think>")
+        var answer = combined.replacingOccurrences(of: "</think>", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Some LFM no-think checkpoints return the same answer twice with a
+        // stray closing tag in between. Collapse that exact repetition.
+        if chunks.count == 2,
+           chunks[0].trimmingCharacters(in: .whitespacesAndNewlines)
+             == chunks[1].trimmingCharacters(in: .whitespacesAndNewlines),
+           !chunks[1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            answer = chunks[1].trimmingCharacters(in: .whitespacesAndNewlines)
+        }
 
         return ReasoningOutput(
             reasoning: reasoningParts.joined(separator: "\n\n")
@@ -1533,8 +1543,13 @@ class LlamaState: ObservableObject {
         rawResponse = rawResponseParts.joined()
         currentResponse = displayParts.joined()
 
-        // Save raw content for accurate multi-turn history (fall back to display if empty)
-        let contentToSave = rawResponse.isEmpty ? currentResponse : rawResponse
+        // Regular chat generation is buffered in the caller. On cancellation,
+        // preserve the coalesced stream (including <think> blocks) so the
+        // partially generated reasoning remains expandable in history.
+        let streamed = LiveTokenStreamModel.shared.text
+        let contentToSave = rawResponse.isEmpty
+            ? (streamed.isEmpty ? currentResponse : streamed)
+            : rawResponse
         if !contentToSave.isEmpty {
             let aiMessage = ChatMessage(content: contentToSave, isUser: false, timestamp: Date())
             messages.append(aiMessage)
@@ -1705,7 +1720,7 @@ class LlamaState: ObservableObject {
         let titleMessages: [(role: String, content: String)] = [
             (role: "system", content: "Generate a 3-5 word title for this conversation. Reply with ONLY the title, nothing else."),
             (role: "user", content: userMessage),
-            (role: "assistant", content: String(assistantMessage.prefix(200))),
+            (role: "assistant", content: String(ReasoningOutput.parse(assistantMessage).answer.prefix(200))),
             (role: "user", content: "Generate a short title for this conversation.")
         ]
 
@@ -1715,6 +1730,7 @@ class LlamaState: ObservableObject {
             await inferenceEngine.clearGenerationState()
             await inferenceEngine.resume()
             await inferenceEngine.setSampling(samplingConfiguration)
+            await inferenceEngine.setReasoningEnabled(false)
             try await inferenceEngine.generateNext(messages: titleMessages)
 
             let titleFilter = SpecialTokenFilter()
@@ -1740,7 +1756,8 @@ class LlamaState: ObservableObject {
             let flush = titleFilter.flush()
             titleResult += titleThinkStripper.process(flush) + titleThinkStripper.flush()
 
-            // Restore KV cache for the user's conversation
+            // Restore the user's reasoning preference and conversation cache.
+            await inferenceEngine.setReasoningEnabled(reasoningEnabled)
             if !conversationMessages.isEmpty {
                 try await inferenceEngine.encodePrompt(messages: conversationMessages)
             } else {
@@ -1770,6 +1787,7 @@ class LlamaState: ObservableObject {
                 }
             }
         } catch {
+            await inferenceEngine.setReasoningEnabled(reasoningEnabled)
             // Fallback: use truncated user message
             let fallback = String(userMessage.prefix(40))
             await MainActor.run {
