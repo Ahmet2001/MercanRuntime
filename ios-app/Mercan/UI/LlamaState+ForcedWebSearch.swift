@@ -141,6 +141,9 @@ extension LlamaState {
         await suspendModelForSpeech()
 
         let webEngine = MercanRuntimeEngine()
+        // Candidates can contain tool JSON or source text before validation.
+        // Keep this path buffered, then show only the accepted reasoning + answer.
+        await webEngine.setStreamPresentationEnabled(false)
         ForcedWebSearchRuntimeState.shared.engine = webEngine
         ForcedWebSearchRuntimeState.shared.cancelled = false
 
