@@ -3,6 +3,7 @@ import Foundation
 actor MercanRuntimeEngine: InferenceEngine {
     private var runtimeContext: MercanRuntimeContext?
     private var samplingConfiguration = SamplingConfiguration.standard
+    private var reasoningEnabled = false
     var isComplete: Bool = true
 
     init() {}
@@ -30,6 +31,14 @@ actor MercanRuntimeEngine: InferenceEngine {
         }
     }
 
+    func setReasoningEnabled(_ enabled: Bool) async {
+        reasoningEnabled = enabled
+    }
+
+    func supportsReasoningControl() async -> Bool {
+        await runtimeContext?.supportsReasoningControl() ?? false
+    }
+
     func generateNext(messages: [(role: String, content: String)]) async throws {
         guard let context = runtimeContext else {
             throw NSError(
@@ -41,7 +50,7 @@ actor MercanRuntimeEngine: InferenceEngine {
 
         await LiveTokenCoalescer.shared.beginGeneration()
         await context.setSampling(samplingConfiguration)
-        let finalPrompt = await context.apply_chat_template(messages: messages)
+        let finalPrompt = await context.apply_chat_template(messages: messages, enableThinking: reasoningEnabled)
         try await context.completion_init_with_cache(text: finalPrompt)
         isComplete = false
     }
@@ -54,7 +63,7 @@ actor MercanRuntimeEngine: InferenceEngine {
                 userInfo: [NSLocalizedDescriptionKey: "libmercan runtime is not initialized"]
             )
         }
-        let finalPrompt = await context.apply_chat_template(messages: messages)
+        let finalPrompt = await context.apply_chat_template(messages: messages, enableThinking: reasoningEnabled)
         try await context.completion_init(text: finalPrompt)
         isComplete = true
     }
@@ -119,7 +128,7 @@ actor MercanRuntimeEngine: InferenceEngine {
 
     func countTokens(for messages: [(role: String, content: String)]) async -> Int {
         guard let context = runtimeContext else { return 0 }
-        let prompt = await context.apply_chat_template(messages: messages)
+        let prompt = await context.apply_chat_template(messages: messages, enableThinking: reasoningEnabled)
         return await context.countTokens(text: prompt)
     }
 
