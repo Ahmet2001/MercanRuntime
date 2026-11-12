@@ -4,6 +4,7 @@ actor MercanRuntimeEngine: InferenceEngine {
     private var runtimeContext: MercanRuntimeContext?
     private var samplingConfiguration = SamplingConfiguration.standard
     private var reasoningEnabled = false
+    private var streamPresentationEnabled = true
     var isComplete: Bool = true
 
     init() {}
@@ -39,6 +40,12 @@ actor MercanRuntimeEngine: InferenceEngine {
         await runtimeContext?.supportsReasoningControl() ?? false
     }
 
+    /// Buffered tool-use candidates must not appear in the chat before validation.
+    func setStreamPresentationEnabled(_ enabled: Bool) async {
+        streamPresentationEnabled = enabled
+        if !enabled { await LiveTokenCoalescer.shared.clearPresentation() }
+    }
+
     func generateNext(messages: [(role: String, content: String)]) async throws {
         guard let context = runtimeContext else {
             throw NSError(
@@ -48,7 +55,9 @@ actor MercanRuntimeEngine: InferenceEngine {
             )
         }
 
-        await LiveTokenCoalescer.shared.beginGeneration()
+        if streamPresentationEnabled {
+            await LiveTokenCoalescer.shared.beginGeneration()
+        }
         await context.setSampling(samplingConfiguration)
         let finalPrompt = await context.apply_chat_template(messages: messages, enableThinking: reasoningEnabled)
         try await context.completion_init_with_cache(text: finalPrompt)
@@ -73,24 +82,30 @@ actor MercanRuntimeEngine: InferenceEngine {
 
         if await context.is_done {
             isComplete = true
-            await LiveTokenCoalescer.shared.finishGeneration()
+            if streamPresentationEnabled {
+                await LiveTokenCoalescer.shared.finishGeneration()
+            }
             return nil
         }
 
         let token = try await context.completion_loop()
-        if !token.isEmpty {
+        if !token.isEmpty && streamPresentationEnabled {
             await LiveTokenCoalescer.shared.ingest(token)
         }
         if await context.is_done {
             isComplete = true
-            await LiveTokenCoalescer.shared.finishGeneration()
+            if streamPresentationEnabled {
+                await LiveTokenCoalescer.shared.finishGeneration()
+            }
         }
         return token
     }
 
     func stop() async {
         isComplete = true
-        await LiveTokenCoalescer.shared.finishGeneration()
+        if streamPresentationEnabled {
+            await LiveTokenCoalescer.shared.finishGeneration()
+        }
         if let context = runtimeContext {
             await context.clearGenerationState()
         }
