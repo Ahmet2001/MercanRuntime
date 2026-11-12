@@ -144,6 +144,10 @@ actor MercanRuntimeContext {
         samplingParams = params
     }
 
+    func supportsReasoningControl() -> Bool {
+        architectureName == "lfm3"
+    }
+
     func model_info() -> String {
         "Mercan \(architectureName) / \(tokenizerName)"
     }
@@ -376,17 +380,18 @@ actor MercanRuntimeContext {
     ) -> String {
         guard isNedoLM else {
             // LFM3 chat template: explicit BOS and English ChatML roles.
-            // `enableThinking` is ignored here (see below).
+            // Reasoning on starts an open think block; off pre-fills a closed one.
             var result = "<|startoftext|>"
             for message in messages {
                 let role = upstreamChatRole(message.role)
                 result += "<|im_start|>\(role)\n\(message.content)<|im_end|>\n"
             }
-            // Always open the reasoning block. LFM3's "<think></think>"
-            // (reasoning off) mode answers, emits a stray </think> and then
-            // repeats the answer; verified identically on upstream llama.cpp.
-            // The reasoning is hidden by ThinkTagStripper (see completion_loop).
-            result += "<|im_start|>assistant\n<think>"
+            // Upstream LFM3 uses an open <think> for reasoning and an empty
+            // <think></think> prefix for no-think mode. Some LFM weights may
+            // still emit reasoning when off; that behavior is model-dependent.
+            result += enableThinking
+                ? "<|im_start|>assistant\n<think>"
+                : "<|im_start|>assistant\n<think></think>"
             return result
         }
 
