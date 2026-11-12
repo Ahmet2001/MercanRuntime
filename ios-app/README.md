@@ -12,6 +12,10 @@ The UI source is based on Silo commit `1be4fa9aad0ec72dbb6f40ac07d537ea16648944`
 
 App changes should now be made directly under `ios-app/Mercan/`. Language-model execution flows through `MercanRuntime.xcframework` (libmercan); CI no longer edits Swift source from YAML.
 
+## LFM reasoning
+
+With an LFM3 `.mercan` model loaded, use the brain icon in the composer or the **Reasoning (LFM)** switch in Settings. The preference persists on-device and starts **off**. Generated `<think>...</think>` text appears in an expandable Reasoning panel; the final answer stays separate. Turning reasoning off asks the model to skip thinking using the upstream `<think></think>` prefix, but compliance is model-dependent. Regular chat streams the reasoning panel live. Web-grounded generations buffer candidates until validated.
+
 ## TestFlight variables
 
 Set these GitHub repository variables when the Apple account is ready:
