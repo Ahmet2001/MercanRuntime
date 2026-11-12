@@ -3,6 +3,8 @@ import SwiftUI
 struct InputComposer: View {
     @Binding var text: String
     @Binding var webSearchForNextPrompt: Bool
+    @Binding var reasoningEnabled: Bool
+    let reasoningSupported: Bool
     let isGenerating: Bool
     var inputsDisabled = false
     let onSend: () -> Void
@@ -40,6 +42,21 @@ struct InputComposer: View {
             .accessibilityLabel("Web Search")
             .accessibilityValue(webSearchForNextPrompt ? "On for next message" : "Off")
             .help("Search the web before answering this message")
+
+            Button {
+                reasoningEnabled.toggle()
+            } label: {
+                Image(systemName: "brain.head.profile")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(reasoningEnabled ? Color.white : Color.primary)
+                    .frame(width: 34, height: 34)
+                    .background(reasoningEnabled ? MercanTheme.coral : Color(.tertiarySystemFill))
+                    .clipShape(Circle())
+            }
+            .disabled(!reasoningSupported || inputsDisabled || isGenerating)
+            .accessibilityLabel("Reasoning")
+            .accessibilityValue(reasoningSupported ? (reasoningEnabled ? "On" : "Off") : "Unavailable for this model")
+            .help("Toggle LFM reasoning for the next message")
 
             TextField(
                 inputsDisabled ? "Waiting for model…" : "Message Mercan",
