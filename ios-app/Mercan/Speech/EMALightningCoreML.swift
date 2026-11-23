@@ -52,11 +52,17 @@ actor EMALightningCoreML {
         let aligner = (metadata["aligner"] as? [String: Any])
             ?? (settings["aligner"] as? [String: Any]) ?? [:]
         alignLookback = (aligner["lookback"] as? Int)
-            ?? (settings["lookback"] as? Int) ?? 1
+            ?? (settings["lookback"] as? Int)
+            ?? (metadata["lookback"] as? Int) ?? 1
         alignLookahead = (aligner["lookahead"] as? Int)
-            ?? (settings["lookahead"] as? Int) ?? 1
+            ?? (settings["lookahead"] as? Int)
+            ?? (metadata["lookahead"] as? Int) ?? 1
+        // The published EMA Lightning weights use global positions measured
+        // in letters, not only the current word. Prefer the voice manifest
+        // when supplied, otherwise follow the original trained model.
         alignLetterPositions = (aligner["letter_pos"] as? Bool)
-            ?? (settings["letter_pos"] as? Bool) ?? false
+            ?? (settings["letter_pos"] as? Bool)
+            ?? (metadata["letter_pos"] as? Bool) ?? true
 
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .cpuOnly // Compatible with Elphi's Core ML validation path.
