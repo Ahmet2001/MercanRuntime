@@ -147,6 +147,7 @@ extension LlamaState {
         ForcedWebSearchRuntimeState.shared.engine = webEngine
         ForcedWebSearchRuntimeState.shared.cancelled = false
 
+        speechSynthesizer.stop()
         let started = Date()
         generatedTokenCount = 0
         currentResponse = ""
@@ -387,6 +388,9 @@ extension LlamaState {
                     // Only a human-readable final answer can enter chat history.
                     currentResponse = saved
                     messages.append(ChatMessage(content: saved, isUser: false, timestamp: Date()))
+                    let spoken = ReasoningOutput.parse(saved).answer
+                    speechSynthesizer.feed(displayText: spoken, enabled: speakRepliesEnabled)
+                    speechSynthesizer.finish(enabled: speakRepliesEnabled)
                     saveCurrentConversation()
                 }
 
