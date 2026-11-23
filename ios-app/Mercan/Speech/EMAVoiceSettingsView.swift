@@ -25,6 +25,11 @@ struct EMAVoiceSettingsView: View {
             } else {
                 Label("EMA Lightning installed · Offline", systemImage: "checkmark.circle")
                     .foregroundStyle(.secondary)
+                Button {
+                    speech.testEMA()
+                } label: {
+                    Label("Test EMA voice", systemImage: "waveform")
+                }
             }
         } else {
             Text("EMA Lightning Core ML requires iOS 26 or newer. The system voice remains available.")
