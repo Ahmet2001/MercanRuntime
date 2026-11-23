@@ -16,6 +16,22 @@ App changes should now be made directly under `ios-app/Mercan/`. Language-model 
 
 With an LFM3 `.mercan` model loaded, use the brain icon in the composer or the **Reasoning (LFM)** switch in Settings. The preference persists on-device and starts **off**. Generated `<think>...</think>` text appears in an expandable Reasoning panel; the final answer stays separate. Turning reasoning off asks the model to skip thinking using the upstream `<think></think>` prefix, but compliance is model-dependent. Regular chat streams the reasoning panel live. Web-grounded generations buffer candidates until validated.
 
+
+## EMA Lightning Turkish voice (experimental)
+
+This branch adds a second, independent on-device inference engine for speech:
+
+- **LLM:** the existing LFM3 `.mercan` model continues to produce text in `MercanRuntime.xcframework`.
+- **TTS:** EMA Lightning synthesizes complete *answer* sentences from the live LFM stream. Text inside `<think>…</think>` is never sent to speech.
+- **Setup:** Settings → Speech → Read answers aloud → Install EMA Lightning → Voice: EMA Lightning.
+- **Compatibility:** the available Core ML conversion targets **iOS 26+**. Earlier iPhones can still use the built-in system speech synthesizer. The app's deployment target remains iOS 18.2.
+- **Storage:** ~32.6 MB is downloaded once, SHA-256 verified, compiled with Core ML and cached under Application Support. The existing LFM model remains loaded.
+- **Fallback:** if the EMA model is missing or its runtime contract disagrees with the published conversion, an error is shown in Speech settings and system speech reads the text instead.
+
+The on-device EMA Core ML runner is a new integration and **needs physical-device testing** against the publisher's model. The app currently provides a lightweight Turkish number expansion, not full `normalizer-tr` parity for every date, currency or abbreviation. The original EMA Lightning is **5.6M acoustic + 3M vocoder parameters**, and emits 48 kHz mono synthetic audio.
+
+Model/code by Canberk Aslan, [EMA Lightning](https://huggingface.co/canberkkkkkk/ema-lightning), Apache-2.0. Core ML distribution by Bosphorus Intelligence LLC, [elphi-si/elphi](https://huggingface.co/elphi-si/elphi), Apache-2.0. The model is downloaded from the publisher on the user's request rather than bundled in the application. Include license/NOTICE terms when redistributing these models.
+
 ## TestFlight variables
 
 Set these GitHub repository variables when the Apple account is ready:
