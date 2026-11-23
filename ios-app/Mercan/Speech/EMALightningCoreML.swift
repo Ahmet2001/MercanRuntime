@@ -9,6 +9,9 @@ actor EMALightningCoreML {
     private var soundModel: MLModel?
     private var decoderModel: MLModel?
     private var vocabulary: [String: Int] = [:]
+    private var alignLookback = 1
+    private var alignLookahead = 1
+    private var alignLetterPositions = false
     private let sampleRate = 48_000
     private let hop = 1_920
     private let latentSize = 64
@@ -40,6 +43,20 @@ actor EMALightningCoreML {
             vocabulary = Dictionary(uniqueKeysWithValues: letters.enumerated().map { ($0.element, $0.offset) })
         }
         guard !vocabulary.isEmpty else { throw EMAError.badMetadata }
+
+        // Elphi voice.json carries the source acoustic model's alignment
+        // settings. Keep the source-model defaults when an older voice
+        // manifest omits them.
+        let settings = (metadata["config"] as? [String: Any])
+            ?? (metadata["cfg"] as? [String: Any]) ?? [:]
+        let aligner = (metadata["aligner"] as? [String: Any])
+            ?? (settings["aligner"] as? [String: Any]) ?? [:]
+        alignLookback = (aligner["lookback"] as? Int)
+            ?? (settings["lookback"] as? Int) ?? 1
+        alignLookahead = (aligner["lookahead"] as? Int)
+            ?? (settings["lookahead"] as? Int) ?? 1
+        alignLetterPositions = (aligner["letter_pos"] as? Bool)
+            ?? (settings["letter_pos"] as? Bool) ?? false
 
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .cpuOnly // Compatible with Elphi's Core ML validation path.
@@ -152,32 +169,56 @@ actor EMALightningCoreML {
         let frameCounts = framesPerWord.map { min(250, max(1, Int($0.rounded()))) }
         let totalFrames = min(3000, frameCounts.reduce(0, +))
         guard totalFrames > 0 else { return [] }
-        var frameWord: [Float] = []
-        var framePosition: [Float] = []
+        var frameWords: [Int] = []
+        var framePositions: [Float] = []
         for w in frameCounts.indices {
-            for f in 0..<frameCounts[w] where frameWord.count < totalFrames {
-                frameWord.append(Float(w))
-                framePosition.append(Float(f) / Float(frameCounts[w]))
+            for f in 0..<frameCounts[w] where frameWords.count < totalFrames {
+                frameWords.append(w)
+                framePositions.append(Float(f) / Float(frameCounts[w]))
             }
         }
 
+        // The Elphi Core ML split deliberately puts the word/frame index
+        // math on the host. EMASound inputs are h, cg, fg, allow and noise.
+        let alignment = EMAAlignment.make(
+            durations: (0..<count).map { durations[$0].floatValue },
+            characterWords: wordOfChar,
+            wordStarts: wordStart,
+            frameWords: frameWords,
+            framePositions: framePositions,
+            lookback: alignLookback,
+            lookahead: alignLookahead,
+            letterPositions: alignLetterPositions
+        )
         let noise = gaussianNoise(count: 4 * totalFrames * latentSize)
         let latentProvider = try predict(soundModel, inputs: [
             "h": ([1, count, hidden], (0..<features.count).map { features[$0].floatValue }),
-            "dur": ([1, count], (0..<count).map { durations[$0].floatValue }),
-            "mask": ([1, count], ones),
-            "cw": ([1, count], wordOfChar.map(Float.init)),
-            "wstart": ([1, count], wordStart.map(Float.init)),
-            "fw": ([1, totalFrames], frameWord),
-            "fp": ([1, totalFrames], framePosition),
-            "fmask": ([1, totalFrames], [Float](repeating: 1, count: totalFrames)),
+            "cg": ([1, count], alignment.cg),
+            "fg": ([1, totalFrames], alignment.fg),
+            "allow": ([1, 1, totalFrames, count], alignment.allow),
             "noise": ([1, 4, totalFrames, latentSize], noise)
         ])
         guard let latents = latentProvider.featureNames.compactMap({
             latentProvider.featureValue(for: $0)?.multiArrayValue
         }).first else { throw EMAError.incompatibleModel("EMASound has no latents output") }
 
-        let flat = (0..<latents.count).map { latents[$0].floatValue }
+        let latentShape = latents.shape.map { $0.intValue }
+        guard latentShape.count == 3 && latents.count == totalFrames * latentSize else {
+            throw EMAError.incompatibleModel("EMASound returned an unexpected latent shape: \(latentShape)")
+        }
+        let values = (0..<latents.count).map { latents[$0].floatValue }
+        // Acoustic.sound_stage returns [1,T,64]. Handle a conversion that
+        // exposes channel-first latents as well.
+        let flat: [Float]
+        if latentShape[2] == latentSize {
+            flat = values
+        } else if latentShape[1] == latentSize {
+            flat = (0..<totalFrames).flatMap { t in
+                (0..<latentSize).map { channel in values[channel * totalFrames + t] }
+            }
+        } else {
+            throw EMAError.incompatibleModel("EMASound latent channel dimension is not 64")
+        }
         var samples: [Float] = []
         var position = 0
         while position < totalFrames {
@@ -185,9 +226,23 @@ actor EMALightningCoreML {
             let contextStart = max(0, position - 8)
             let contextEnd = min(totalFrames, end + 8)
             let n = contextEnd - contextStart
-            let z = Array(flat[(contextStart * latentSize)..<(contextEnd * latentSize)])
+            let channelFirst = decoderModel.modelDescription
+                .inputDescriptionsByName["z"]?.multiArrayConstraint?.shape
+                .map { $0.intValue }.dropFirst().first == latentSize
+            let z: [Float]
+            let zShape: [Int]
+            if channelFirst {
+                // Original PyTorch decoder accepts [B, 64, T].
+                zShape = [1, latentSize, n]
+                z = (0..<latentSize).flatMap { channel in
+                    (contextStart..<contextEnd).map { t in flat[t * latentSize + channel] }
+                }
+            } else {
+                zShape = [1, n, latentSize]
+                z = Array(flat[(contextStart * latentSize)..<(contextEnd * latentSize)])
+            }
             let output = try predict(decoderModel, inputs: [
-                "z": ([1, n, latentSize], z),
+                "z": (zShape, z),
                 "lengths": ([1], [Float(n)])
             ])
             guard let audio = output.featureNames.compactMap({
