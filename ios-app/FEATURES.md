@@ -21,6 +21,9 @@ The iOS app is a local-first Mercan client built on `libmercan`.
 - System-prompt presets plus custom system prompt
 - Runtime diagnostics
 - Local inference benchmark
+- EMA Lightning Turkish 8.6M TTS voice on iOS 26+ (downloadable, SHA-256 verified Core ML)
+- Sentence-level live voice playback while the LFM .mercan model generates text
+- Reasoning content is excluded from generated speech; system speech remains the fallback
 - Privacy explanation
 - User-friendly model error card
 
