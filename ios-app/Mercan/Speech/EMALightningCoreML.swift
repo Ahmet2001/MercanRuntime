@@ -23,13 +23,23 @@ actor EMALightningCoreML {
         guard let metadata = try JSONSerialization.jsonObject(with: json) as? [String: Any] else {
             throw EMAError.badMetadata
         }
-        let letters = (metadata["vocab"] as? [String])
-            ?? (metadata["alphabet"] as? [String])
-            ?? (metadata["characters"] as? [String])
-            ?? (metadata["vocab"] as? String).map { $0.map(String.init) }
-            ?? (metadata["alphabet"] as? String).map { $0.map(String.init) }
-        guard let letters, !letters.isEmpty else { throw EMAError.badMetadata }
-        vocabulary = Dictionary(uniqueKeysWithValues: letters.enumerated().map { ($0.element, $0.offset) })
+        let dictionaries = [metadata,
+                            metadata["model"] as? [String: Any] ?? [:],
+                            metadata["config"] as? [String: Any] ?? [:]]
+        if let mapping = dictionaries.compactMap({ $0["stoi"] as? [String: Int] }).first {
+            vocabulary = mapping
+        } else {
+            let letters = dictionaries.compactMap { object -> [String]? in
+                for key in ["vocab", "alphabet", "characters"] {
+                    if let list = object[key] as? [String] { return list }
+                    if let text = object[key] as? String { return text.map(String.init) }
+                }
+                return nil
+            }.first
+            guard let letters, !letters.isEmpty else { throw EMAError.badMetadata }
+            vocabulary = Dictionary(uniqueKeysWithValues: letters.enumerated().map { ($0.element, $0.offset) })
+        }
+        guard !vocabulary.isEmpty else { throw EMAError.badMetadata }
 
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .cpuOnly // Compatible with Elphi's Core ML validation path.
