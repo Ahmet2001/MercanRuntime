@@ -182,6 +182,14 @@ struct ContentView: View {
                             .onChange(of: streamingContent) { _, value in
                                 if llamaState.isGenerating && !value.isEmpty {
                                     throttledStreamingScroll(proxy)
+                                    // EMA receives only the final-answer region. In
+                                    // particular, LFM <think> blocks are excluded.
+                                    if !isSearchingWeb && llamaState.speakRepliesEnabled {
+                                        llamaState.speechSynthesizer.feed(
+                                            displayText: ReasoningOutput.parse(value).answer,
+                                            enabled: true
+                                        )
+                                    }
                                 }
                             }
                             .onChange(of: llamaState.isThinking) { _, value in
