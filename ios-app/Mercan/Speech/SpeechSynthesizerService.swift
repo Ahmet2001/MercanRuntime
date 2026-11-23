@@ -75,6 +75,16 @@ final class SpeechSynthesizerService: NSObject, ObservableObject {
         }
     }
 
+    func testEMA() {
+        guard isEMASupported && isEMAInstalled else {
+            emaError = EMAError.missingModels.localizedDescription
+            return
+        }
+        stop()
+        voiceEngine = .emaLightning
+        speak("Merhaba, ben Mercan. Yerel ses modeli hazır.")
+    }
+
     func stop() {
         generationID &+= 1
         queue?.cancel()
