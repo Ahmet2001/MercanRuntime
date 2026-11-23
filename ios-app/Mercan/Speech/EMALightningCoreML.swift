@@ -191,11 +191,20 @@ actor EMALightningCoreML {
             letterPositions: alignLetterPositions
         )
         let noise = gaussianNoise(count: 4 * totalFrames * latentSize)
+        let allowRank = soundModel.modelDescription.inputDescriptionsByName["allow"]?
+            .multiArrayConstraint?.shape.count ?? 0
+        let allowShape: [Int]
+        switch allowRank {
+        case 3: allowShape = [1, totalFrames, count]
+        case 4: allowShape = [1, 1, totalFrames, count]
+        default:
+            throw EMAError.incompatibleModel("EMASound allow tensor rank \(allowRank) is unsupported")
+        }
         let latentProvider = try predict(soundModel, inputs: [
             "h": ([1, count, hidden], (0..<features.count).map { features[$0].floatValue }),
             "cg": ([1, count], alignment.cg),
             "fg": ([1, totalFrames], alignment.fg),
-            "allow": ([1, 1, totalFrames, count], alignment.allow),
+            "allow": (allowShape, alignment.allow),
             "noise": ([1, 4, totalFrames, latentSize], noise)
         ])
         guard let latents = latentProvider.featureNames.compactMap({
@@ -226,9 +235,12 @@ actor EMALightningCoreML {
             let contextStart = max(0, position - 8)
             let contextEnd = min(totalFrames, end + 8)
             let n = contextEnd - contextStart
-            let channelFirst = decoderModel.modelDescription
-                .inputDescriptionsByName["z"]?.multiArrayConstraint?.shape
-                .map { $0.intValue }.dropFirst().first == latentSize
+            let decoderShape = decoderModel.modelDescription.inputDescriptionsByName["z"]?
+                .multiArrayConstraint?.shape.map { $0.intValue } ?? []
+            guard decoderShape.count == 3 else {
+                throw EMAError.incompatibleModel("EMADecoder input z must be a rank-3 tensor")
+            }
+            let channelFirst = decoderShape[1] == latentSize
             let z: [Float]
             let zShape: [Int]
             if channelFirst {
