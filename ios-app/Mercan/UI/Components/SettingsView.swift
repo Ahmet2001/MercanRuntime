@@ -86,6 +86,11 @@ struct SettingsView: View {
                     GenerationSlider(title: "Repeat penalty", value: $llamaState.repeatPenalty, range: 1.0...1.5, step: 0.05)
                 }
 
+                Section("Speech") {
+                    Toggle("Read answers aloud", isOn: $llamaState.speakRepliesEnabled)
+                    EMAVoiceSettingsView(speech: llamaState.speechSynthesizer)
+                }
+
                 Section("Web") {
                     Label("Per-message Web Search", systemImage: "globe")
                     Text("Tap the globe next to the message field before sending. Mercan searches first, injects the fresh web results as grounding context, and only then lets the local model generate the answer. The model no longer decides whether to call web search itself.")
