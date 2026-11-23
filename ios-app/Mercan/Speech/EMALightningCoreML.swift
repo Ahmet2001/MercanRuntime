@@ -203,14 +203,22 @@ actor EMALightningCoreML {
         return samples
     }
 
-    /// Input names are validated instead of guessing, so format changes cannot
-    /// silently turn into synthetic noise or unrelated audio.
+    /// Core ML conversion can fold padding masks and the decoder's length
+    /// argument into the graph. Supply these only if the compiled model actually
+    /// declares them. All other inputs remain mandatory and validated.
     private func predict(_ model: MLModel, inputs: [String: ([Int], [Float])]) throws -> MLFeatureProvider {
+        let declared = model.modelDescription.inputDescriptionsByName
+        let foldedInputs: Set<String> = ["mask", "fmask", "lengths"]
         var features: [String: MLFeatureValue] = [:]
         for (name, value) in inputs {
-            guard let description = model.modelDescription.inputDescriptionsByName[name],
-                  let constraint = description.multiArrayConstraint else {
-                throw EMAError.incompatibleModel("missing input \(name)")
+            guard let description = declared[name] else {
+                if foldedInputs.contains(name) { continue }
+                throw EMAError.incompatibleModel(
+                    "unexpected input \(name); Core ML accepts: \(declared.keys.sorted().joined(separator: ", "))"
+                )
+            }
+            guard let constraint = description.multiArrayConstraint else {
+                throw EMAError.incompatibleModel("input \(name) is not a tensor")
             }
             let (shape, scalars) = value
             let array = try MLMultiArray(shape: shape.map { NSNumber(value: $0) }, dataType: constraint.dataType)
@@ -219,6 +227,10 @@ actor EMALightningCoreML {
             }
             for i in scalars.indices { array[i] = NSNumber(value: scalars[i]) }
             features[name] = MLFeatureValue(multiArray: array)
+        }
+        let missing = declared.keys.filter { features[$0] == nil }.sorted()
+        guard missing.isEmpty else {
+            throw EMAError.incompatibleModel("Core ML requires: \(missing.joined(separator: ", "))")
         }
         return try model.prediction(from: MLDictionaryFeatureProvider(dictionary: features))
     }
