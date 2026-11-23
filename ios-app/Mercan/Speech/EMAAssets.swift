@@ -71,7 +71,7 @@ enum EMAAssets {
         // Core ML compilation may be expensive; never run it on the SwiftUI actor.
         for (index, name) in ["EMAText", "EMASound", "EMADecoder"].enumerated() {
             try Task.checkCancellation()
-            let compiled = try MLModel.compileModel(at: staging.appendingPathComponent("\(name).mlpackage"))
+            let compiled = try await MLModel.compileModel(at: staging.appendingPathComponent("\(name).mlpackage"))
             try manager.moveItem(at: compiled, to: staging.appendingPathComponent("\(name).mlmodelc"))
             progress(Double(assets.count + index + 1) / Double(assets.count + 3))
         }
